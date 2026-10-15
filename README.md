@@ -173,6 +173,19 @@ Double-click `mkds.bat` and choose **Display settings**, or edit `settings.txt` 
 For one run, `play.bat --renderer software` or `play.bat --scale 4` override the file. Graphics cards without compute
 shaders (very old ones) automatically fall back to drawing on the CPU.
 
+### Texture packs
+
+The GPU renderer can save every texture the game uses and load replacements, for example sharper hand-made or upscaled
+versions:
+
+1. In `settings.txt`, set `DumpTextures = C:\MKDS textures\dump` and play: each texture is saved once as `<id>.png`.
+2. Edit or upscale the PNGs you want. A replacement must be the original size times a whole number from 1 to 8 (for example
+   a 64 x 32 texture can become 256 x 128). Keep the file names.
+3. Put the replacements in a folder and set `TexturePack = C:\MKDS textures\pack` (and `DumpTextures =` to stop dumping).
+
+A replacement with the wrong size is ignored with a message naming the file. Dumped textures come from your copy of the game:
+do not share them.
+
 ---
 
 ## What you need
@@ -247,8 +260,9 @@ Game options (after `play.exe` or `play`): `--mute`, `--stats` (prints speed and
    input, timers) on your PC.
 5. **Package** - `play.exe`, `game.exe`, `assets\`, `source\` and the fingerprints are placed in the output folder.
 
-No instruction is emulated at run time: the shipped game contains no interpreter. The DS graphics and sound chips are still recreated
-in software (that is why it uses some CPU); moving them to the graphics card is the next milestone.
+No instruction is emulated at run time: the shipped game contains no interpreter. The 3D graphics and the final screens are drawn
+by your graphics card at a higher resolution, and the sound channels are mixed straight at your audio device's rate. The 2D
+layers (backgrounds and sprites) are still decoded on the CPU at the DS's resolution, as the game's code drives them.
 
 Research notes and progress: **https://docs.cameronstorer.com/mkds-decomp-docs/**
 
@@ -260,8 +274,10 @@ Research notes and progress: **https://docs.cameronstorer.com/mkds-decomp-docs/*
   audio quality, and performance across other Linux desktops have not been validated. WSLg emitted nonfatal
   Wayland decoration/cleanup warnings during the smoke test.
 - macOS: native build path and setup instructions provided; not tested on a Mac.
-- Existing Windows testing: menus, Grand Prix races (Mushroom, Flower, Shell cups), Mission 1-1, Battle mode, full races through the results screen;
-  real-time speed and clean audio on a 6-core PC.
+- Windows: menus, Grand Prix races (Mushroom, Flower, Shell cups), Mission 1-1, Battle mode, full races through the results screen;
+  real-time speed and clean audio on a 6-core PC. GPU renderer (block 2): checked against the CPU renderer on 549 recorded frames
+  (99.99% identical pixels; the differences are single edge pixels) and played at 60 frames per second with sound on an RTX 2060.
+  The GPU renderer and controllers have not been tested on Linux or macOS yet.
 - Known issues: occasional stutter, the race position badge can show the wrong number, rare visual glitches, the in-game keyboard
   may repeat keys.
 

@@ -41,3 +41,15 @@ sequencer would change game behaviour. "Native audio" here means our mixer write
 ## Work split
 - agent-lift (Claude): B2.0, B2.1, B2.3, B2.4 integration, B2.6, B2.7.
 - Codex (worktree `block2-gpu3d`): B2.2 as a standalone module with a fixed interface, verified by the comparator.
+
+## Status (2026-10-15)
+| Stage | Result |
+|---|---|
+| B2.0 | `MKSNAP01` snapshots (`--snapshots DIR --snapshot-every N`), `render_compare`; corpus of 549 frames (GP race, battle, menus + a second race); self-test 100% |
+| B2.1 | winit 0.30 + wgpu 30 window on the main thread, game on its own thread (`HostLink`); resizable, F11 fullscreen, AZERTY-safe keys, gilrs controllers (`Pad` lines in `controls.txt`); `minifb` removed |
+| B2.2 | GPU 3D renderer (Codex): compute tile rasterizer, content-hashed texture cache. Scale 1 vs software 3D layer: 99.998% / 99.994% / 99.999% average, worst frame 99.898%; GPU 0.08-0.22 ms/frame |
+| B2.3 | `Engine2d::render_split` + `Split::pixel` (exact on all 549 frames and 60 random screens, mutation-checked) and the GPU compositor (exact with the software 3D layer on all 549 frames; full GPU screens 99.997-99.999%). In the game: 2D split on two threads (~5.5 ms), 3D + composition on the GPU, 60 fps presented at 100% speed |
+| B2.4 | `settings.txt` (Renderer, Scale/Auto, Filter, Layout, Fullscreen, TexturePack, DumpTextures), Auto scale on resize, side-by-side layout, CPU fallback without compute shaders, "Display settings" in the `mkds.bat` menu |
+| B2.5 | Texture dump/packs (Codex, finished by agent-lift): stable FNV ids, integer-factor replacements; 111 corpus textures; a 2x nearest pack renders identically to no pack on all 549 frames |
+| B2.6 | Sound mixed at the device rate (Codex): exact timer stepping at any rate, passthrough output; windowed race at 48 kHz: 1 underrun (start-up) in 60 s |
+| B2.7 | Fresh no-cache build (8 min): 11,297 functions, complete. Acceptance driver on it: race finished 1st (frame 11,331), 1.67 billion ARM9 instructions, 0 interpreted. `play.exe` with Scale 4, Smooth, SideBySide and a colour-inverted 111-texture pack: 4x, pack loaded, replaced textures visible, 100% speed, 60 fps, 48 kHz audio. Tests: builder 37, runtime 140, host 27, shell wrappers. Not tested: the GPU renderer and controllers on Linux/macOS; a physical controller |
