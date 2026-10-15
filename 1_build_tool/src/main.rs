@@ -33,7 +33,7 @@ struct Args {
     /// Empty output directory (default: ~/MKDS Builds/<hash prefix>)
     #[arg(long)]
     out: Option<PathBuf>,
-    /// Checkout containing 3_hand_port/game/Cargo.toml (default: search upward from cwd and the executable)
+    /// Source checkout (default: search upward from cwd and the executable)
     #[arg(long)]
     source: Option<PathBuf>,
     /// Allow experimental builds from modified AMCE revision 0 ROMs
@@ -45,7 +45,7 @@ struct Args {
     /// Do not keep the generated Rust source tree in the bundle (it is kept by default)
     #[arg(long)]
     no_source: bool,
-    /// Verification only: also build acceptance.exe (adaptive race driver on the generated code)
+    /// Verification only: also build the acceptance executable (adaptive race driver on generated code)
     #[arg(long)]
     with_acceptance: bool,
     /// Parallel compile jobs for the generated code (default: half your logical CPUs, 2..=8)
@@ -54,7 +54,7 @@ struct Args {
     /// Fresh build in a temporary directory instead of the persistent build cache
     #[arg(long, conflicts_with = "cache_dir")]
     no_cache: bool,
-    /// Build cache location (default: %LOCALAPPDATA%\mkds_builder or ~/.cache/mkds_builder)
+    /// Build cache location (default: LocalAppData on Windows, ~/Library/Caches on macOS, XDG cache on Linux)
     #[arg(long, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
     /// Delete the build cache, then exit
@@ -101,7 +101,7 @@ fn find_source(explicit: Option<PathBuf>) -> Result<PathBuf, BuildError> {
         .ok()
         .and_then(|e| build::find_source(&e));
     cwd.or(exe).map_or_else(
-        || err("No checkout found (needs 3_hand_port/game/Cargo.toml). Run from inside the repository or pass --source."),
+        || err("No checkout found (needs 2_native_game/Cargo.toml). Run from inside the repository or pass --source."),
         Ok,
     )
 }

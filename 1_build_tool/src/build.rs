@@ -57,7 +57,7 @@ pub struct RecompileOptions {
     pub allow_incomplete: bool,
     /// Keep the generated Rust workspace in the bundle as `source/` (viewable, rebuildable).
     pub keep_source: bool,
-    /// Also build `acceptance.exe`: the adaptive race driver (2_native_game/native/src/bin/race_check.rs)
+    /// Also build the acceptance executable: the adaptive race driver (2_native_game/native/src/bin/race_check.rs)
     /// running on this build's generated table. Verification only; not part of a normal bundle.
     pub with_acceptance: bool,
     /// Parallel compiler jobs for the generated workspace (`None`: half the logical CPUs, 2..=8).
@@ -100,10 +100,12 @@ fn recomp_without_defaults(ws: &Path, with_interpreter: bool) -> Result<usize, B
     Ok(changed)
 }
 
-/// Default cache: `%LOCALAPPDATA%\mkds_builder` on Windows, `$XDG_CACHE_HOME` or `~/.cache` elsewhere.
+/// Default cache: LocalAppData on Windows, Library/Caches on macOS, XDG cache on Linux.
 pub fn default_cache_dir() -> PathBuf {
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        Some(home().join("Library/Caches"))
     } else {
         std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from)
     };
@@ -882,6 +884,24 @@ fn launch_command(bundle: &Path, m: &serde_json::Value, exe: &str, rom: &str, ex
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_unix_executable_launches_with_spaced_paths_and_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join("source files");
+        let bundle = d.path().join("bundle with spaces");
+        std::fs::create_dir(&source).unwrap();
+        let game = source.join("game");
+        std::fs::write(&game, "#!/bin/sh\n[ \"$1\" = '--label' ] && [ \"$2\" = 'two words' ] || exit 9\nexit 23\n").unwrap();
+        std::fs::set_permissions(&game, std::fs::Permissions::from_mode(0o755)).unwrap();
+        copy_tree(&source, &bundle).unwrap();
+        assert_ne!(std::fs::metadata(bundle.join("game")).unwrap().permissions().mode() & 0o111, 0);
+        let m = json!({"rom": {"path": "absent.nds"}, "executable": "game", "launch_args": []});
+        std::fs::write(bundle.join("manifest.json"), m.to_string()).unwrap();
+        assert_eq!(launch(&bundle, &["--label".into(), "two words".into()]).unwrap(), 23);
+    }
 
     #[test]
     fn launcher_rejects_path_like_executable_names() {

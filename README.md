@@ -1,10 +1,10 @@
 # MKDS Native Builder
 
-Turn **your own copy of MKDS** into a **native Windows program**, built on your own PC.
+Turn **your own copy of MKDS** into a **native program**, built on your own Windows, Linux, or macOS computer.
 
 This repository contains **no game**: no ROM, no game code, no graphics, sounds or other game files. You supply your own `.nds`
 file; the builder reads it on your machine, translates the game's machine code into Rust source code, compiles it and gives you a
-`play.exe`. Nothing from the game ever leaves your computer.
+`play.exe` on Windows or `play` on Linux/macOS. Nothing from the game ever leaves your computer.
 
 ---
 
@@ -39,6 +39,67 @@ That's it.
 asks), play it, and change the controls, all from one place.
 
 ---
+
+## Quick start (Linux and macOS)
+
+Build on the operating system where you will play; these scripts do not cross-compile.
+
+**1. Install prerequisites**
+
+On Debian/Ubuntu Linux:
+
+```sh
+sudo apt-get update
+sudo apt-get install build-essential pkg-config curl ca-certificates libasound2-dev \
+  libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev \
+  libwayland-dev libxkbcommon-dev
+```
+
+Other Linux distributions need equivalent C compiler, pkg-config, ALSA, X11, Wayland, and xkbcommon development packages.
+Playing requires a graphical desktop and a working audio device. WSL2 requires WSLg for the game window;
+if ALSA has no default audio device, use `--mute` or install `libasound2-plugins` and configure ALSA to use your
+WSLg PulseAudio server. To test audio without changing your system defaults, save this as `alsa-wsl.conf` in
+your output folder:
+
+```text
+</usr/share/alsa/alsa.conf>
+pcm.!default { type pulse }
+ctl.!default { type pulse }
+```
+
+Then launch from that folder with `ALSA_CONFIG_PATH="$PWD/alsa-wsl.conf" ./play` (WSLg supplies `PULSE_SERVER`).
+
+On macOS, install Apple's command line tools:
+
+```sh
+xcode-select --install
+```
+
+On either OS, install the current stable Rust toolchain from **https://rustup.rs**, then reopen your terminal.
+Use the native Rust toolchain for your processor (including Apple Silicon). macOS support is untested.
+
+**2. Build and play**
+
+Download or clone this repository, open a terminal in it, and run:
+
+```sh
+sh build.sh "/path/to/your/game.nds"
+sh play.sh
+```
+
+In a Git checkout the scripts can also be run as `./build.sh` and `./play.sh`. Scripts work from other directories
+too; relative ROM/output paths are relative to your terminal's current directory. Quote paths containing spaces.
+
+For a custom output directory:
+
+```sh
+sh build.sh "/path/to/your/game.nds" "/path/to/empty/output"
+"/path/to/empty/output/play" --stats
+```
+
+`play.sh` starts the default `builds/mkds/play` and forwards all game arguments. Native outputs are OS-specific;
+use separate output folders when sharing a checkout between Windows and WSL. The shell builder keeps its own
+compiler artifacts under `1_build_tool/target/<OS>-<architecture>`.
 
 ## Controls
 
@@ -80,7 +141,7 @@ To use a different file once: `play.bat --controls "C:\path\to\controls.txt"`.
 
 - **Your own ROM** of MKDS, USA version: game code `AMCE`, revision 0. Make it from a cartridge you own. Other versions are refused
   with a clear message (they are not supported yet).
-- Windows 10 or 11 (64-bit), about **2 GB** free disk space and **8 GB RAM** recommended.
+- Windows 10 or 11 (64-bit), desktop Linux, or macOS (untested); about **2 GB** free disk space and **8 GB RAM** recommended.
 - Rust (step 1). An internet connection for the **first** build only.
 
 ---
@@ -97,6 +158,9 @@ Everything goes into `builds\mkds\` (ignored by git, so it can never be uploaded
 | `source\` | The Rust code generated from your ROM: you can read it and rebuild it yourself |
 | `manifest.json` | Fingerprints (SHA-256) of your ROM, the files, the generated code and the program |
 
+On Linux/macOS the executables are named `play` and `game`, with the same bundle layout. Keep their executable
+permissions when moving a bundle. A bundle must run on a compatible OS/architecture with the native libraries installed.
+
 **Please do not share `assets\`, `source\` or the built game** - they are made from your copy of the game.
 
 ---
@@ -112,9 +176,12 @@ Run `build.bat "game.nds" "C:\some\other\empty\folder"` to build somewhere else.
 ```
 
 Useful build options: `--offline` (no network, once everything is downloaded), `--jobs N` (how many CPU cores to use),
-`--no-cache` (fresh build), `--clear-cache` (delete the build cache in `%LOCALAPPDATA%\mkds_builder`), `--no-source` (don't keep `source\`).
+`--no-cache` (fresh build), `--clear-cache` (delete the build cache), `--no-source` (don't keep `source\`).
+The default cache is `%LOCALAPPDATA%\mkds_builder` on Windows, `${XDG_CACHE_HOME:-~/.cache}/mkds_builder` on Linux,
+and `~/Library/Caches/mkds_builder` on macOS. Override it with `--cache-dir FOLDER`.
+On Unix, call `1_build_tool/target/$(uname -s)-$(uname -m)/release/mkds_builder` for the same advanced options.
 
-Game options (after `play.exe`): `--mute`, `--stats` (prints speed and frame counters once a second).
+Game options (after `play.exe` or `play`): `--mute`, `--stats` (prints speed and frame counters once a second).
 
 ---
 
@@ -149,10 +216,29 @@ Research notes and progress: **https://docs.cameronstorer.com/mkds-decomp-docs/*
 
 ## Status
 
-- Tested: menus, Grand Prix races (Mushroom, Flower, Shell cups), Mission 1-1, Battle mode, full races through the results screen;
+- Linux: builder, recompiler/generator, and native-host tests pass on Debian 13 x86-64 under WSL2. A full ROM build
+  and 600-frame WSLg run with audio and scripted input completed successfully, reaching nickname confirmation.
+  Recoverable ALSA underruns no longer terminate the game. Full Linux races, physical keyboard/mouse input,
+  audio quality, and performance across other Linux desktops have not been validated. WSLg emitted nonfatal
+  Wayland decoration/cleanup warnings during the smoke test.
+- macOS: native build path and setup instructions provided; not tested on a Mac.
+- Existing Windows testing: menus, Grand Prix races (Mushroom, Flower, Shell cups), Mission 1-1, Battle mode, full races through the results screen;
   real-time speed and clean audio on a 6-core PC.
 - Known issues: occasional stutter, the race position badge can show the wrong number, rare visual glitches, the in-game keyboard
   may repeat keys.
+
+### Developer checks
+
+```sh
+cargo test --locked --manifest-path 1_build_tool/Cargo.toml
+cargo test --locked --manifest-path 2_native_game/Cargo.toml --features gen
+cargo test --locked --manifest-path 2_native_game/native/Cargo.toml
+sh tests/shell_scripts.sh  # Linux/macOS wrapper checks; no ROM needed
+```
+
+Some ROM-dependent tests skip unless their documented environment variables are set; the ignored native-window
+test is Windows-only. For a bounded smoke test of an actual Unix bundle, run `./play --frames 300 --stats`
+from its output folder (add `--mute` if no audio device is available).
 
 ## Legal
 

@@ -46,6 +46,16 @@ impl Queue {
         }
     }
 
+    fn stream_error(&mut self, error: cpal::StreamError) {
+        // CPAL's ALSA backend prepares/recovers the stream after an xrun. A brief
+        // scheduling delay is an audio glitch, not a reason to stop the game.
+        if matches!(error, cpal::StreamError::BufferUnderrun) {
+            self.underruns += 1;
+        } else {
+            self.error = Some(error.to_string());
+        }
+    }
+
     /// One device frame. `step` is source frames consumed per device frame (source rate / device rate).
     fn next(&mut self, step: f64) -> [i16; 2] {
         if !self.primed {
@@ -164,7 +174,7 @@ where
         },
         move |e| {
             if let Ok(mut q) = errors.lock() {
-                q.error = Some(e.to_string());
+                q.stream_error(e);
             }
         },
         None,
@@ -174,6 +184,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recoverable_device_underrun_does_not_stop_playback() {
+        let mut q = Queue::new();
+        q.stream_error(cpal::StreamError::BufferUnderrun);
+        assert!(q.error.is_none());
+        assert_eq!(q.underruns, 1);
+        q.push(std::iter::repeat_n([123, -123], PRIME_FRAMES));
+        assert_eq!(q.next(1.0), [123, -123]);
+        q.stream_error(cpal::StreamError::DeviceNotAvailable);
+        let fatal = q.error.clone();
+        assert!(fatal.is_some());
+        q.stream_error(cpal::StreamError::BufferUnderrun);
+        assert_eq!(q.error, fatal, "an underrun must not clear a fatal device error");
+    }
 
     fn sine(frames: usize, hz: f64) -> Vec<[i16; 2]> {
         let rate = recomp::spu::SAMPLE_RATE as f64;
