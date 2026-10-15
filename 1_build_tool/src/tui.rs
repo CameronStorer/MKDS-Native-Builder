@@ -3,6 +3,7 @@ use crate::build;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, ModifierKeyCode};
 use mkds_builder::controls::{self, ACTIONS, Controls, KEYS, ROLES};
 use mkds_builder::rom::{RomInfo, inspect_rom};
+use mkds_builder::settings::{self, Layout as ScreenLayout, Renderer, Settings};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
@@ -31,6 +32,7 @@ enum Screen {
     Rom { input: String, error: Option<String> },
     Building { log: Vec<String>, rx: Receiver<Msg>, result: Option<Result<PathBuf, String>> },
     Controls { c: Controls, path: Option<PathBuf>, list: ListState, capture: bool, note: Option<(String, Color)> },
+    Display { s: Settings, path: Option<PathBuf>, list: ListState, note: Option<(String, Color)> },
 }
 
 enum Exit {
@@ -71,7 +73,7 @@ fn home_items(cfg: &Config) -> Vec<&'static str> {
     } else {
         v.push("Build the game from my ROM");
     }
-    v.extend(["Change controls", "Quit"]);
+    v.extend(["Change controls", "Display settings", "Quit"]);
     v
 }
 
@@ -126,6 +128,16 @@ fn app(terminal: &mut DefaultTerminal, cfg: &mut Config, note: Option<(String, C
                                 None => (Controls::default(), Some(("No settings folder found; changes cannot be saved.".into(), Color::Red))),
                             };
                             screen = Screen::Controls { c, path, list: ListState::default().with_selected(Some(0)), capture: false, note };
+                            continue;
+                        }
+                        "Display settings" => {
+                            let path = settings::default_path();
+                            let (s, note) = match path.as_deref().map(Settings::load_or_create) {
+                                Some(Ok(s)) => (s, None),
+                                Some(Err(e)) => (Settings::default(), Some((format!("{e}. Showing the defaults; saving replaces the file."), Color::Red))),
+                                None => (Settings::default(), Some(("No settings folder found; changes cannot be saved.".into(), Color::Red))),
+                            };
+                            screen = Screen::Display { s, path, list: ListState::default().with_selected(Some(0)), note };
                             continue;
                         }
                         "Quit" => return Ok(Exit::Quit),
@@ -217,7 +229,73 @@ fn app(terminal: &mut DefaultTerminal, cfg: &mut Config, note: Option<(String, C
                 }
                 Screen::Controls { c, path, list, capture, note }
             }
+            Screen::Display { mut s, path, mut list, note } => {
+                let items = DISPLAY_ROWS.len() + 2; // settings, then save, back
+                let sel = list.selected().unwrap_or(0);
+                let mut note = note;
+                match key.code {
+                    KeyCode::Esc => {
+                        screen = home(None);
+                        continue;
+                    }
+                    KeyCode::Up => list.select(Some((sel + items - 1) % items)),
+                    KeyCode::Down => list.select(Some((sel + 1) % items)),
+                    KeyCode::Enter | KeyCode::Right | KeyCode::Left if sel < DISPLAY_ROWS.len() => {
+                        change_setting(&mut s, sel, key.code != KeyCode::Left);
+                        note = Some(("Remember to save.".into(), Color::Green));
+                    }
+                    KeyCode::Enter if sel == DISPLAY_ROWS.len() => {
+                        let saved = path.as_deref().ok_or_else(|| "No settings folder found.".to_string()).and_then(|p| s.save(p));
+                        screen = match saved {
+                            Ok(()) => home(Some(("Display settings saved. They apply the next time the game starts.".into(), Color::Green))),
+                            Err(e) => Screen::Display { s, path, list, note: Some((e, Color::Red)) },
+                        };
+                        continue;
+                    }
+                    KeyCode::Enter => {
+                        screen = home(None);
+                        continue;
+                    }
+                    _ => {}
+                }
+                Screen::Display { s, path, list, note }
+            }
         };
+    }
+}
+
+/// The settings the menu can change, in order: (name, what it does).
+const DISPLAY_ROWS: [(&str, &str); 5] = [
+    ("Renderer", "GPU: graphics card, sharp 3D. Software: CPU, like block 1"),
+    ("Scale", "3D sharpness (x the DS's 256x192); Auto fits the window"),
+    ("Filter", "how stretched screens look"),
+    ("Layout", "where the bottom screen goes"),
+    ("Fullscreen", "start in fullscreen (F11 switches while playing)"),
+];
+
+fn setting_value(s: &Settings, row: usize) -> String {
+    match row {
+        0 => if s.renderer == Renderer::Gpu { "GPU" } else { "Software" }.into(),
+        1 => s.scale.map_or("Auto".into(), |v| format!("{v}x")),
+        2 => if s.smooth { "Smooth" } else { "Sharp" }.into(),
+        3 => if s.layout == ScreenLayout::Stacked { "Stacked" } else { "Side by side" }.into(),
+        _ => if s.fullscreen { "Yes" } else { "No" }.into(),
+    }
+}
+
+/// Steps setting `row` to its next (or previous) value.
+fn change_setting(s: &mut Settings, row: usize, forward: bool) {
+    match row {
+        0 => s.renderer = if s.renderer == Renderer::Gpu { Renderer::Software } else { Renderer::Gpu },
+        1 => {
+            // Auto, 1x .. 8x, round and round
+            let order: Vec<Option<u32>> = std::iter::once(None).chain((1..=8).map(Some)).collect();
+            let at = order.iter().position(|v| *v == s.scale).unwrap_or(0);
+            s.scale = order[if forward { (at + 1) % order.len() } else { (at + order.len() - 1) % order.len() }];
+        }
+        2 => s.smooth = !s.smooth,
+        3 => s.layout = if s.layout == ScreenLayout::Stacked { ScreenLayout::SideBySide } else { ScreenLayout::Stacked },
+        _ => s.fullscreen = !s.fullscreen,
     }
 }
 
@@ -376,6 +454,24 @@ fn draw(f: &mut Frame, screen: &Screen, cfg: &Config) {
             f.render_widget(Paragraph::new(v).wrap(Wrap { trim: false }).block(Block::bordered()), body);
             f.render_widget(Paragraph::new(if result.is_some() { "Enter: back to the menu" } else { "Please wait" }), help);
         }
+        Screen::Display { s, path, list, note } => {
+            let [top, bottom] = Layout::vertical([Constraint::Min(5), Constraint::Length(4)]).areas(body);
+            let mut items: Vec<ListItem> = DISPLAY_ROWS
+                .iter()
+                .enumerate()
+                .map(|(row, (name, what))| ListItem::new(format!("{name:<11} {:<13} ({what})", setting_value(s, row))))
+                .collect();
+            items.extend(["Save and go back", "Go back without saving"].map(ListItem::new));
+            f.render_stateful_widget(list_style(List::new(items).block(Block::bordered().title("Display"))), top, &mut list.clone());
+            let mut v = Vec::new();
+            noted(&mut v, note);
+            v.push(Line::from(match path {
+                Some(p) => format!("File: {} (texture packs are set there)", p.display()),
+                None => "File: (no settings folder)".into(),
+            }));
+            f.render_widget(Paragraph::new(v).wrap(Wrap { trim: false }), bottom);
+            f.render_widget(Paragraph::new("Enter / Left / Right: change   Esc: back"), help);
+        }
         Screen::Controls { c, path, list, capture, note } => {
             let [top, bottom] = Layout::vertical([Constraint::Min(5), Constraint::Length(4)]).areas(body);
             let mut items: Vec<ListItem> = (0..ACTIONS.len())
@@ -433,7 +529,8 @@ mod tests {
             home(note.clone()),
             Screen::Rom { input: "C:\\game.nds".into(), error: Some("Not found".into()) },
             Screen::Building { log: vec!["[1/5] Checking".into(); 50], rx: channel().1, result: Some(Err("x".into())) },
-            Screen::Controls { c: Controls::default(), path: None, list: ListState::default().with_selected(Some(3)), capture: true, note },
+            Screen::Controls { c: Controls::default(), path: None, list: ListState::default().with_selected(Some(3)), capture: true, note: note.clone() },
+            Screen::Display { s: Settings::default(), path: None, list: ListState::default().with_selected(Some(1)), note },
         ];
         for (w, h) in [(80, 24), (40, 12)] {
             let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
@@ -446,6 +543,27 @@ mod tests {
         let text: String = t.backend().buffer().content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("L       A") && text.contains("use item"), "controls list shows L = A");
         assert!(text.contains("Press the new key for Start"));
+    }
+
+    #[test]
+    fn display_settings_step_through_every_value_and_back() {
+        let mut s = Settings::default();
+        let mut seen = Vec::new();
+        for _ in 0..9 {
+            seen.push(setting_value(&s, 1));
+            change_setting(&mut s, 1, true);
+        }
+        assert_eq!(seen, ["Auto", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x"]);
+        assert_eq!(s.scale, None, "wraps around to Auto");
+        change_setting(&mut s, 1, false);
+        assert_eq!(s.scale, Some(8));
+        for row in [0, 2, 3, 4] {
+            let before = setting_value(&s, row);
+            change_setting(&mut s, row, true);
+            assert_ne!(setting_value(&s, row), before);
+            change_setting(&mut s, row, true);
+            assert_eq!(setting_value(&s, row), before, "two-value settings toggle");
+        }
     }
 
     #[test]

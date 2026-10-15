@@ -6,6 +6,7 @@ mod pad;
 pub mod window;
 mod script;
 use mkds_builder::controls::{self, Controls};
+use mkds_builder::settings::{Layout, Renderer, Settings};
 use window::HostLink;
 use recomp::{boot::session::Session, dispatch::Dispatcher, mem::Lifted, rt::Mem};
 use std::{
@@ -40,8 +41,8 @@ pub struct Options {
     pub input_log: Option<PathBuf>,
     /// Keyboard controls file (default: the user's `controls.txt`, see `mkds_builder::controls`).
     pub controls: Option<PathBuf>,
-    /// `--renderer software`: the block 1 CPU renderer instead of the GPU (also the GPU's reference).
-    pub software_renderer: bool,
+    /// `--renderer software|gpu`; `None` = from `settings.txt`. Software is the block 1 CPU renderer (the GPU's reference).
+    pub software_renderer: Option<bool>,
     /// `--scale N`: 3D and screen resolution as a multiple of the DS's 256x192 (GPU renderer, 1-8).
     pub scale: Option<u32>,
 }
@@ -57,8 +58,8 @@ impl Options {
                 "--stats" => result.stats = true,
                 "--diagnostic-arm7-interpreter" => result.diagnostic_arm7_interpreter = true,
                 "--renderer" => match args.next().as_deref() {
-                    Some("gpu") => result.software_renderer = false,
-                    Some("software") => result.software_renderer = true,
+                    Some("gpu") => result.software_renderer = Some(false),
+                    Some("software") => result.software_renderer = Some(true),
                     _ => return Err("--renderer needs gpu or software".into()),
                 },
                 "--scale" => {
@@ -337,9 +338,17 @@ fn run_internal(
     }
     let bindings = load_bindings(&options)?;
     let title = bindings.title.clone();
+    let settings = load_settings()?;
+    let mut options = options;
+    options.software_renderer = Some(options.software_renderer.unwrap_or(settings.renderer == Renderer::Software));
+    let display = window::Display {
+        scale: options.scale.or(settings.scale),
+        smooth: settings.smooth,
+        side_by_side: settings.layout == Layout::SideBySide,
+        fullscreen: settings.fullscreen,
+    };
     // The window needs the main thread; the game runs on a second one and meets it through `HostLink`.
-    let scale = options.scale.unwrap_or(2);
-    window::run(&title, scale, move |link| emulate(rom, image, table, signatures, table7, &options, Some(link), bindings))?
+    window::run(&title, display, move |link| emulate(rom, image, table, signatures, table7, &options, Some(link), bindings))?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -438,7 +447,7 @@ fn emulate(
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     }
     let busy = Arc::new(AtomicBool::new(false));
-    let renderer = window.is_some().then(|| spawn_renderer(busy.clone(), !options.software_renderer));
+    let renderer = window.is_some().then(|| spawn_renderer(busy.clone(), options.software_renderer != Some(true)));
     // Wall-clock time spent re-anchoring the schedule after a slow stretch (no catch-up sprint).
     let mut skew = Duration::ZERO;
     let mut parity: Option<Vec<u32>> = None;
@@ -581,7 +590,7 @@ fn emulate(
                             let snap_started = Instant::now();
                             let job = session.render_snapshot();
                             stats.snapshot_time += snap_started.elapsed();
-                            if options.stats && options.software_renderer && jobs % 120 == 0 {
+                            if options.stats && options.software_renderer == Some(true) && jobs % 120 == 0 {
                                 parity = Some(session.screens());
                             }
                             jobs += 1;
@@ -744,6 +753,17 @@ impl Bindings {
     fn quit(&self, window: &HostLink, pads: &pad::Pads) -> bool {
         window.any_down(&self.quit_keys) || window.focused() && pads.any_down(&self.quit_pad)
     }
+}
+
+fn load_settings() -> Result<Settings, String> {
+    let Some(path) = mkds_builder::settings::default_path() else {
+        return Ok(Settings::default());
+    };
+    let s = Settings::load_or_create(&path)
+        .map_err(|e| format!("Settings file problem: {e}
+Fix it, or delete it to get the default settings back."))?;
+    eprintln!("Settings: {}", path.display());
+    Ok(s)
 }
 
 fn load_bindings(options: &Options) -> Result<Bindings, String> {

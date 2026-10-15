@@ -119,8 +119,21 @@ impl HostLink {
 }
 
 /// Runs the window on this (main) thread and `emulation` on a second thread until the emulation returns.
-/// `scale`: the GPU renderer's resolution as a multiple of 256x192.
-pub fn run<T: Send>(title: &str, scale: u32, emulation: impl FnOnce(Arc<HostLink>) -> T + Send) -> Result<T, String> {
+/// How the window shows the screens (from `settings.txt` and the command line).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Display {
+    /// GPU resolution as a multiple of 256x192; `None` = the sharpest that fits the window (up to 4x).
+    pub scale: Option<u32>,
+    /// Linear filtering when stretching (`false` = sharp pixels).
+    pub smooth: bool,
+    pub side_by_side: bool,
+    pub fullscreen: bool,
+}
+
+/// Highest scale `Auto` picks: beyond 4x the GPU cost grows faster than the screens get sharper.
+const AUTO_MAX: u32 = 4;
+
+pub fn run<T: Send>(title: &str, display: Display, emulation: impl FnOnce(Arc<HostLink>) -> T + Send) -> Result<T, String> {
     let event_loop = EventLoop::<()>::with_user_event().build().map_err(|e| format!("Cannot start the window system: {e}"))?;
     let link = HostLink::new();
     *link.proxy.lock().unwrap() = Some(event_loop.create_proxy());
@@ -140,7 +153,7 @@ pub fn run<T: Send>(title: &str, scale: u32, emulation: impl FnOnce(Arc<HostLink
                 emulation(Arc::clone(&done.0))
             })
             .map_err(|e| format!("Cannot start the emulation thread: {e}"))?;
-        let mut app = App { link: Arc::clone(&link), title: title.to_owned(), scale, window: None, gfx: None, error: None, cursor: None, mouse_down: false };
+        let mut app = App { link: Arc::clone(&link), title: title.to_owned(), display, window: None, gfx: None, error: None, cursor: None, mouse_down: false };
         // A panic in the window must still stop the game thread (the scope waits for it) before it is reported.
         let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| event_loop.run_app(&mut app)));
         link.closed.store(true, Ordering::Release);
@@ -179,7 +192,7 @@ pub fn run<T: Send>(title: &str, scale: u32, emulation: impl FnOnce(Arc<HostLink
 struct App {
     link: Arc<HostLink>,
     title: String,
-    scale: u32,
+    display: Display,
     window: Option<Arc<Window>>,
     gfx: Option<Presenter>,
     error: Option<String>,
@@ -202,13 +215,15 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+        let (w, h) = if self.display.side_by_side { (W * 2, H / 2) } else { (W, H) };
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_inner_size(LogicalSize::new(W * 2, H * 2))
-            .with_min_inner_size(LogicalSize::new(W / 2, H / 2));
+            .with_inner_size(LogicalSize::new(w * 2, h * 2))
+            .with_min_inner_size(LogicalSize::new(w / 2, h / 2))
+            .with_fullscreen(self.display.fullscreen.then_some(Fullscreen::Borderless(None)));
         let made = event_loop.create_window(attrs).map_err(|e| format!("Cannot open game window: {e}")).and_then(|w| {
             let w = Arc::new(w);
-            Presenter::new(Arc::clone(&w), self.scale).map(|p| (w, p))
+            Presenter::new(Arc::clone(&w), self.display).map(|p| (w, p))
         });
         match made {
             Ok((w, p)) => {
@@ -343,30 +358,49 @@ fn physical_name(code: KeyCode) -> Option<&'static str> {
     })
 }
 
-/// Where the two screens sit in the window: the largest 2:3 rectangle that fits, centred.
+/// A screen's rectangle in window pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Layout {
+pub struct Rect {
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
 }
 
+/// Where the two screens sit in the window: the largest arrangement that fits (stacked 256x384 or side by side
+/// 512x192), centred, keeping the DS's pixel shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub top: Rect,
+    pub bottom: Rect,
+    pub side_by_side: bool,
+}
+
 impl Layout {
-    pub fn fit(width: u32, height: u32) -> Layout {
-        let s = (width as f64 / W as f64).min(height as f64 / H as f64).max(0.0);
-        let (w, h) = (W as f64 * s, H as f64 * s);
-        Layout { x: (width as f64 - w) / 2.0, y: (height as f64 - h) / 2.0, w, h }
+    pub fn fit(width: u32, height: u32, side_by_side: bool) -> Layout {
+        let (cw, ch) = if side_by_side { (512.0, 192.0) } else { (256.0, 384.0) };
+        let s = (width as f64 / cw).min(height as f64 / ch).max(0.0);
+        let (x, y) = ((width as f64 - cw * s) / 2.0, (height as f64 - ch * s) / 2.0);
+        let (w, h) = (256.0 * s, 192.0 * s);
+        let top = Rect { x, y, w, h };
+        let bottom = if side_by_side { Rect { x: x + w, y, w, h } } else { Rect { x, y: y + h, w, h } };
+        Layout { top, bottom, side_by_side }
     }
 
     /// Window pixel -> bottom-screen pixel, if it lies on the bottom screen.
     pub fn touch(&self, px: f64, py: f64) -> Option<(u8, u8)> {
-        if self.w <= 0.0 {
+        let r = self.bottom;
+        if r.w <= 0.0 {
             return None;
         }
-        let x = (px - self.x) / self.w * W as f64;
-        let y = (py - self.y) / self.h * H as f64 - 192.0;
+        let x = (px - r.x) / r.w * 256.0;
+        let y = (py - r.y) / r.h * 192.0;
         ((0.0..256.0).contains(&x) && (0.0..192.0).contains(&y)).then(|| (x as u8, y as u8))
+    }
+
+    /// The scale `Auto` uses: enough GPU pixels for every window pixel of a screen, 1 to [`AUTO_MAX`].
+    pub fn auto_scale(&self) -> u32 {
+        ((self.top.h / 192.0).ceil() as u32).clamp(1, AUTO_MAX)
     }
 }
 
@@ -374,11 +408,13 @@ const PRESENT_WGSL: &str = r#"
 @group(0) @binding(0) var screens: texture_2d<f32>;
 @group(0) @binding(1) var nearest: sampler;
 struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
-@vertex fn vs(@builtin(vertex_index) i: u32) -> Out {
+// Instance 0: the whole texture (stacked screens); 1: its top half; 2: its bottom half (side by side).
+@vertex fn vs(@builtin(vertex_index) i: u32, @builtin(instance_index) part: u32) -> Out {
     let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
     var o: Out;
     o.pos = vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
-    o.uv = vec2<f32>(p.x, 1.0 - p.y);
+    let v = 1.0 - p.y;
+    o.uv = vec2<f32>(p.x, select(select(0.5 + v * 0.5, v * 0.5, part == 1u), v, part == 0u));
     return o;
 }
 @fragment fn fs(o: Out) -> @location(0) vec4<f32> {
@@ -402,11 +438,12 @@ struct Presenter {
     /// The GPU renderer, created with the first GPU frame, and the bind group showing its output.
     gpu_path: Option<(Renderer3d, Compositor, wgpu::BindGroup)>,
     scale: u32,
+    display: Display,
     showing_gpu: bool,
 }
 
 impl Presenter {
-    fn new(window: Arc<Window>, scale: u32) -> Result<Presenter, String> {
+    fn new(window: Arc<Window>, display: Display) -> Result<Presenter, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance.create_surface(Arc::clone(&window)).map_err(|e| format!("Cannot draw into the window: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -434,7 +471,7 @@ impl Presenter {
             view_formats: &[],
         });
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
+            mag_filter: if display.smooth { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
@@ -492,10 +529,12 @@ impl Presenter {
             multiview_mask: None,
             cache: None,
         });
-        let layout = Layout::fit(config.width, config.height);
+        let layout = Layout::fit(config.width, config.height, display.side_by_side);
+        let scale = display.scale.unwrap_or_else(|| layout.auto_scale());
+        eprintln!("Display: {} renderer at {scale}x, {}", gpu.adapter.get_info().name, if display.scale.is_none() { "Auto" } else { "fixed" });
         Ok(Presenter {
             window, gpu, surface, config, screens, bind, bind_layout, sampler, pipeline, layout,
-            rgba: vec![0; (W * H * 4) as usize], gpu_path: None, scale, showing_gpu: false,
+            rgba: vec![0; (W * H * 4) as usize], gpu_path: None, scale, display, showing_gpu: false,
         })
     }
 
@@ -506,7 +545,11 @@ impl Presenter {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.gpu.device, &self.config);
-        self.layout = Layout::fit(size.width, size.height);
+        self.layout = Layout::fit(size.width, size.height, self.display.side_by_side);
+        if self.display.scale.is_none() && self.layout.auto_scale() != self.scale {
+            self.scale = self.layout.auto_scale();
+            self.gpu_path = None; // rebuilt at the new scale with the next frame
+        }
     }
 
     fn bind_texture(&self, texture: &wgpu::Texture, srgb_view: bool) -> wgpu::BindGroup {
@@ -574,15 +617,22 @@ impl Presenter {
                 ..Default::default()
             });
             let l = self.layout;
-            if l.w >= 1.0 && l.h >= 1.0 {
-                pass.set_viewport(l.x as f32, l.y as f32, l.w as f32, l.h as f32, 0.0, 1.0);
+            if l.top.w >= 1.0 && l.top.h >= 1.0 {
                 pass.set_pipeline(&self.pipeline);
                 let bind = match (&self.gpu_path, self.showing_gpu) {
                     (Some((_, _, gpu_bind)), true) => gpu_bind,
                     _ => &self.bind,
                 };
                 pass.set_bind_group(0, bind, &[]);
-                pass.draw(0..3, 0..1);
+                if l.side_by_side {
+                    for (part, r) in [(1u32, l.top), (2, l.bottom)] {
+                        pass.set_viewport(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 0.0, 1.0);
+                        pass.draw(0..3, part..part + 1);
+                    }
+                } else {
+                    pass.set_viewport(l.top.x as f32, l.top.y as f32, l.top.w as f32, (l.top.h * 2.0) as f32, 0.0, 1.0);
+                    pass.draw(0..3, 0..1);
+                }
             }
         }
         self.gpu.queue.submit([encoder.finish()]);
@@ -613,14 +663,23 @@ mod tests {
 
     #[test]
     fn the_screens_keep_their_shape_and_touch_maps_to_the_bottom_screen() {
-        let l = Layout::fit(512, 768);
-        assert_eq!(l, Layout { x: 0.0, y: 0.0, w: 512.0, h: 768.0 });
+        let l = Layout::fit(512, 768, false);
+        assert_eq!(l.top, Rect { x: 0.0, y: 0.0, w: 512.0, h: 384.0 });
+        assert_eq!(l.bottom, Rect { x: 0.0, y: 384.0, w: 512.0, h: 384.0 });
         assert_eq!(l.touch(0.0, 384.0), Some((0, 0)));
         assert_eq!(l.touch(511.0, 767.0), Some((255, 191)));
         assert_eq!(l.touch(100.0, 383.0), None, "top screen is not touchable");
-        let wide = Layout::fit(1920, 1080);
-        assert_eq!((wide.w, wide.h, wide.x, wide.y), (720.0, 1080.0, 600.0, 0.0));
+        assert_eq!(l.auto_scale(), 2);
+        let wide = Layout::fit(1920, 1080, false);
+        assert_eq!((wide.top.w, wide.top.h, wide.top.x, wide.top.y), (720.0, 540.0, 600.0, 0.0));
         assert_eq!(wide.touch(599.0, 900.0), None, "black bars");
         assert_eq!(wide.touch(600.0 + 360.0, 540.0 + 270.0), Some((128, 96)));
+        assert_eq!(wide.auto_scale(), 3, "540 window pixels per screen need 3x");
+        let side = Layout::fit(1920, 1080, true);
+        assert_eq!(side.top, Rect { x: 0.0, y: 180.0, w: 960.0, h: 720.0 });
+        assert_eq!(side.bottom.x, 960.0);
+        assert_eq!(side.touch(960.0 + 480.0, 180.0 + 360.0), Some((128, 96)));
+        assert_eq!(side.touch(480.0, 540.0), None, "left is the top screen");
+        assert_eq!(Layout::fit(3840, 2160, false).auto_scale(), AUTO_MAX);
     }
 }
