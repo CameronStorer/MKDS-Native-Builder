@@ -50,7 +50,7 @@ On Debian/Ubuntu Linux:
 
 ```sh
 sudo apt-get update
-sudo apt-get install build-essential pkg-config curl ca-certificates libasound2-dev \
+sudo apt-get install build-essential pkg-config curl ca-certificates libasound2-dev libudev-dev \
   libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev \
   libwayland-dev libxkbcommon-dev
 ```
@@ -115,6 +115,18 @@ compiler artifacts under `1_build_tool/target/<OS>-<architecture>`.
 | **Right Shift** | Select | |
 | **Left mouse button** (on the lower screen) | Touch screen | |
 | **Esc** | | Quit |
+| **F11** | | Fullscreen on/off |
+
+**Game controllers** (Xbox, PlayStation, Switch Pro and most others) work too: plug one in before starting the game.
+
+| Controller | DS button |
+|---|---|
+| **A** (bottom face button) or **right trigger** | A (accelerate) |
+| **B** (right face button) or **left trigger** | B (brake) |
+| **Y** / **X** (top / left face buttons) | X / Y |
+| **Left / right bumper** | L (item) / R (drift) |
+| **D-pad** or **left stick** | D-pad |
+| **Start** / **Back (View)** | Start / Select |
 
 ### Changing the controls
 
@@ -134,6 +146,32 @@ Semicolon Slash`, `NumPad0`-`NumPad9 NumPadDot NumPadSlash NumPadAsterisk NumPad
 `CapsLock NumLock ScrollLock Pause Menu`. Changes apply the next time the game starts, and the file survives rebuilds.
 If the file has a mistake, the game says which line; delete the file to get the default controls back.
 To use a different file once: `play.bat --controls "C:\path\to\controls.txt"`.
+
+Controller buttons have their own lines, starting with `Pad`: for example `Pad L = LB, RT`. Names are by position, so they
+work for any controller: `South East North West` (face buttons; South is Xbox A / PlayStation Cross), `LB RB LT RT`,
+`Start Select`, `DPadUp DPadDown DPadLeft DPadRight`, `StickUp StickDown StickLeft StickRight` (left stick),
+`LeftStick RightStick` (pressed in) and `Guide`. Files without `Pad` lines use the controller layout above.
+
+---
+
+## Display
+
+The 3D graphics and both screens are drawn by your **graphics card** (Direct3D 12 or Vulkan on Windows, Vulkan on Linux,
+Metal on macOS), at a higher resolution than the DS's 256 x 192 so the 3D looks sharp on modern monitors. The window can be
+resized and made fullscreen (F11).
+
+Double-click `mkds.bat` and choose **Display settings**, or edit `settings.txt` (in the same folder as `controls.txt`):
+
+| Setting | Values | What it does |
+|---|---|---|
+| `Renderer` | `GPU` (default), `Software` | `Software` draws everything on the CPU, exactly like the first version |
+| `Scale` | `Auto` (default), `1`-`8` | 3D sharpness as a multiple of 256 x 192. `Auto` picks the sharpest that fits the window, up to 4x |
+| `Filter` | `Sharp` (default), `Smooth` | How the screens look when stretched to the window |
+| `Layout` | `Stacked` (default), `SideBySide` | Top screen above the bottom one, or next to it for wide monitors |
+| `Fullscreen` | `No` (default), `Yes` | Start in fullscreen |
+
+For one run, `play.bat --renderer software` or `play.bat --scale 4` override the file. Graphics cards without compute
+shaders (very old ones) automatically fall back to drawing on the CPU.
 
 ---
 
