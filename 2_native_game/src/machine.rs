@@ -564,12 +564,122 @@ mod tests {
 /// Owned GPU inputs. No CPU memory, device state or references to the running machine.
 #[derive(Clone)]
 pub struct RenderSnapshot {
-    io: Vec<u8>,
-    palette: Vec<u8>,
-    oam: Vec<u8>,
-    vram: Vec<Vec<u8>>,
-    polys: Vec<crate::gx::Polygon>,
-    viewport: [u8; 4],
+    /// ARM9 I/O registers (both 2D engines, 3D control, VRAMCNT, CLEAR_COLOR ...).
+    pub io: Vec<u8>,
+    /// Standard palettes: engine A BG/OBJ, then engine B.
+    pub palette: Vec<u8>,
+    /// OAM: engine A, then engine B.
+    pub oam: Vec<u8>,
+    /// VRAM banks A-I.
+    pub vram: Vec<Vec<u8>>,
+    /// The last completed 3D frame's polygons, in submission order.
+    pub polys: Vec<crate::gx::Polygon>,
+    /// VIEWPORT (x1, y1, x2, y2) of that frame.
+    pub viewport: [u8; 4],
+}
+
+const SNAPSHOT_MAGIC: &[u8; 8] = b"MKSNAP01";
+
+impl RenderSnapshot {
+    /// The renderer input as one file (`MKSNAP01`). It holds game graphics: keep snapshots local.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut o = SNAPSHOT_MAGIC.to_vec();
+        let bytes = |o: &mut Vec<u8>, b: &[u8]| {
+            o.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            o.extend_from_slice(b);
+        };
+        bytes(&mut o, &self.io);
+        bytes(&mut o, &self.palette);
+        bytes(&mut o, &self.oam);
+        o.extend_from_slice(&(self.vram.len() as u32).to_le_bytes());
+        for bank in &self.vram {
+            bytes(&mut o, bank);
+        }
+        o.extend_from_slice(&self.viewport);
+        o.extend_from_slice(&(self.polys.len() as u32).to_le_bytes());
+        for p in &self.polys {
+            for v in [p.attr, p.tex_param, p.pltt_base, p.verts.len() as u32] {
+                o.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in &p.verts {
+                for c in v.clip {
+                    o.extend_from_slice(&c.to_le_bytes());
+                }
+                o.extend_from_slice(&v.color.to_le_bytes());
+                o.extend_from_slice(&v.st[0].to_le_bytes());
+                o.extend_from_slice(&v.st[1].to_le_bytes());
+            }
+        }
+        o
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, String> {
+        struct Reader<'a>(&'a [u8], usize);
+        impl<'a> Reader<'a> {
+            fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+                let b = self.0.get(self.1..self.1 + n).ok_or("render snapshot is truncated")?;
+                self.1 += n;
+                Ok(b)
+            }
+            fn u32(&mut self) -> Result<u32, String> {
+                Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+            }
+            fn bytes(&mut self) -> Result<Vec<u8>, String> {
+                let n = self.u32()? as usize;
+                if n > 1 << 24 {
+                    return Err("render snapshot field too large".into());
+                }
+                Ok(self.take(n)?.to_vec())
+            }
+        }
+        let mut r = Reader(data, 0);
+        if r.take(8)? != SNAPSHOT_MAGIC {
+            return Err("not a render snapshot (MKSNAP01)".into());
+        }
+        let (io, palette, oam) = (r.bytes()?, r.bytes()?, r.bytes()?);
+        let banks = r.u32()? as usize;
+        if banks > 16 {
+            return Err("render snapshot has too many VRAM banks".into());
+        }
+        let vram = (0..banks).map(|_| r.bytes()).collect::<Result<Vec<_>, _>>()?;
+        let viewport: [u8; 4] = r.take(4)?.try_into().unwrap();
+        let count = r.u32()? as usize;
+        let mut polys = Vec::with_capacity(count.min(1 << 16));
+        for _ in 0..count {
+            let (attr, tex_param, pltt_base, n) = (r.u32()?, r.u32()?, r.u32()?, r.u32()? as usize);
+            if n > 64 {
+                return Err("render snapshot polygon has too many vertices".into());
+            }
+            let mut verts = Vec::with_capacity(n);
+            for _ in 0..n {
+                let b = r.take(22)?;
+                let i = |k: usize| i32::from_le_bytes(b[k..k + 4].try_into().unwrap());
+                let h = |k: usize| [b[k], b[k + 1]];
+                verts.push(crate::gx::Vertex {
+                    clip: [i(0), i(4), i(8), i(12)],
+                    color: u16::from_le_bytes(h(16)),
+                    st: [i16::from_le_bytes(h(18)), i16::from_le_bytes(h(20))],
+                });
+            }
+            polys.push(crate::gx::Polygon { verts, attr, tex_param, pltt_base });
+        }
+        let s = Self { io, palette, oam, vram, polys, viewport };
+        if s.io.len() < 0x1070 || s.palette.len() < 0x800 || s.oam.len() < 0x800 || s.vram.len() < 9 {
+            return Err("render snapshot is missing renderer state".into());
+        }
+        Ok(s)
+    }
+
+    /// The software 3D layer alone (packed `0xRRGGBBAA`, alpha 0 = no 3D pixel): the GPU renderer's reference.
+    pub fn layer3d(&self) -> Vec<u32> {
+        render_3d(&self.io, &self.vram, &self.polys, self.viewport)
+    }
+
+    /// Texture memory as the 3D engine sees it (VRAMCNT-mapped slots) and CLEAR_COLOR as packed RGBA.
+    pub fn texture_memory(&self) -> (Vec<u8>, Vec<u8>) {
+        let cnt: Vec<u8> = (0x240..0x247).map(|i| self.io[i]).collect();
+        crate::texture::assemble(&self.vram[..7], &cnt)
+    }
 }
 
 /// Native-window pixels and renderer stage costs (3D, engine A, engine B).
@@ -656,6 +766,26 @@ impl Machine<'_> {
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[test]
+    fn snapshot_file_round_trips_and_rejects_damage() {
+        let dispatcher = crate::dispatch::Dispatcher::new(&[]);
+        let mut m = Machine::new(crate::ds_mem::Bus::new(), &dispatcher);
+        fixture(&mut m, 1);
+        let mut snap = m.render_snapshot();
+        snap.polys = vec![crate::gx::Polygon {
+            verts: (0..3).map(|i| crate::gx::Vertex { clip: [i, -i, 4096 * i, 4096], color: 0x7c1f, st: [-16, 32] }).collect(),
+            attr: 0x001f_00c0, tex_param: 0x1234_5678, pltt_base: 0x40,
+        }];
+        snap.viewport = [1, 2, 254, 190];
+        let file = snap.encode();
+        let back = RenderSnapshot::decode(&file).unwrap();
+        assert_eq!(back.encode(), file);
+        assert_eq!(back.polys, snap.polys);
+        assert_eq!(back.screens(), snap.screens());
+        assert!(RenderSnapshot::decode(&file[..file.len() - 1]).is_err());
+        assert!(RenderSnapshot::decode(b"MKSNAP00").is_err());
+    }
     use crate::rt::Mem;
     fn fixture(m: &mut Machine, variant: u32) {
         let h = &mut m.hw;

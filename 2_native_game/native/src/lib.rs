@@ -1,6 +1,7 @@
 //! Native host for the locally generated game. Call `run` with the generated lift table.
 mod audio;
 pub mod assets;
+pub mod gpu;
 mod script;
 use minifb::{Key, MouseButton, MouseMode, Scale, Window, WindowOptions};
 use mkds_builder::controls::{self, Controls};
@@ -25,6 +26,10 @@ pub struct Options {
     pub instruction_limit: Option<u64>,
     pub frame_limit: Option<u64>,
     pub capture_dir: Option<PathBuf>,
+    /// Write the renderer input (`MKSNAP01`) every `snapshot_every` frames into this folder (local diagnostics:
+    /// snapshots contain game graphics).
+    pub snapshots: Option<PathBuf>,
+    pub snapshot_every: Option<u64>,
     pub input_script: Option<PathBuf>,
     pub gx_trace: Option<PathBuf>,
     /// Print once per second: emulated vs wall time, frames presented/rendered, audio underruns.
@@ -56,6 +61,12 @@ impl Options {
                     result.instruction_limit = Some(positive(args.next(), "--instructions")?)
                 }
                 "--frames" => result.frame_limit = Some(positive(args.next(), "--frames")?),
+                "--snapshots" => {
+                    result.snapshots = Some(args.next().ok_or("--snapshots needs a directory")?.into())
+                }
+                "--snapshot-every" => {
+                    result.snapshot_every = Some(positive(args.next(), "--snapshot-every")?)
+                }
                 "--capture" => {
                     result.capture_dir =
                         Some(args.next().ok_or("--capture needs a directory")?.into())
@@ -395,6 +406,10 @@ fn run_internal(
         }));
     }
     let mut last_frame = u64::MAX;
+    let mut last_snapshot = u64::MAX;
+    if let Some(dir) = &options.snapshots {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+    }
     let mut last_present = start;
     let busy = Arc::new(AtomicBool::new(false));
     let renderer = window.is_some().then(|| spawn_renderer(busy.clone()));
@@ -436,6 +451,15 @@ fn run_internal(
                     n.saturating_sub(session.stats.instructions).min(16_384) as u32
                 });
                 session.advance(remaining)?;
+                if let Some(dir) = &options.snapshots {
+                    let frame = session.frame_number();
+                    if frame != last_snapshot && frame % options.snapshot_every.unwrap_or(60) == 0 {
+                        last_snapshot = frame;
+                        let path = dir.join(format!("f{frame:06}.mksnap"));
+                        std::fs::write(&path, session.render_snapshot().encode())
+                            .map_err(|e| format!("Cannot write snapshot {}: {e}", path.display()))?;
+                    }
+                }
                 if options.stats && arm7_stats_mark.0.elapsed() >= Duration::from_secs(1) {
                     if let Some(a) = &session.machine.arm7 {
                         eprintln!("[stats] ARM7 lifted_cycles={} interpreted_instructions={} pc={:#010x}",
