@@ -1,6 +1,6 @@
 # MKDS Native Builder
 
-Turn **your own copy of MKDS** (the Nintendo DS game, USA version) into a **native Windows program**, built on your own PC.
+Turn **your own copy of MKDS** into a **native Windows program**, built on your own PC.
 
 This repository contains **no game**: no ROM, no game code, no graphics, sounds or other game files. You supply your own `.nds`
 file; the builder reads it on your machine, translates the game's machine code into Rust source code, compiles it and gives you a
