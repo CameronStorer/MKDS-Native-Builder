@@ -429,7 +429,9 @@ impl State7 {
             }
             0x102 | 0x106 | 0x10A | 0x10E => self.timers[((off - 0x102) / 4) as usize].ctrl as u32,
             0x130 => hw.r16(0x0400_0130) as u32,
-            0x136 => hw.extended_keys() as u32,
+            // RCNT, with EXTKEYIN (X, Y, debug, pen, hinge) in the upper half: `read` asks for the
+            // aligned word, so a halfword read of 0x136 arrives here
+            0x134 => u16::from_le_bytes([self.io[0x134], self.io[0x135]]) as u32 | (hw.extended_keys() as u32) << 16,
             0x180 => self.sync_ctl & 0x4F00 | hw.arm9_sync_out() as u32,
             0x184 => {
                 let recv_empty = self.fifo_pos >= hw.ipc_out.len();
@@ -917,5 +919,18 @@ mod tests {
         );
         assert_eq!(hw.fifo_in.front(), Some(&0x1234));
         assert_eq!(a.cpu.r[2], 0xBEEF);
+    }
+
+    #[test]
+    fn extkeyin_halfword_read_sees_x_y_and_pen() {
+        // The SDK's ARM7 pad alarm reads 0x04000136 as a halfword and copies X/Y/debug to 0x027FFFA8;
+        // reading 0 there makes the ARM9 see X and Y held forever (L then never triggers an item).
+        let mut hw = ds_mem::Bus::new();
+        let mut a = Arm7::new();
+        let mut v = View { s: &mut a.s, hw: &mut hw };
+        assert_eq!(v.r16(0x0400_0136), 0x007F, "nothing held, pen up, lid open");
+        v.hw.set_input(crate::input::HostInput { buttons: 1 << 10, pen_down: true, ..Default::default() });
+        assert_eq!(v.r16(0x0400_0136), 0x003E, "X held and pen down read low");
+        assert_eq!(v.r32(0x0400_0134) >> 16, 0x003E);
     }
 }
