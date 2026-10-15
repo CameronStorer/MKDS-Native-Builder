@@ -340,6 +340,144 @@ impl Engine2d<'_> {
         (self.r16(0x4a) >> if object { 8 } else { 0 }) & 0x3f
     }
 
+    /// The layer stack at one pixel, in the order `render` builds it: up to two `(layer, colour, semi)` entries
+    /// (layer 0-3 BG, 4 OBJ, 5 backdrop; layer 0 with `three_d` = the 3D pixel). `three_d`: `None` = no 3D pixel
+    /// here; `Some(alpha)` = a 3D pixel of that alpha (colour 0 stands in for it).
+    fn stack(&self, d: u32, x: usize, y: usize, sprites: &[Option<(u8, u32, bool)>; W], mask: u32, three_d: Option<u32>)
+        -> [(usize, u32, bool); 2] {
+        let backdrop = rgb(self.pal(0));
+        let blend = self.r16(0x50);
+        let mut layers = [(5usize, backdrop, false); 2];
+        let mut count = 0;
+        let mut add = |layer, color: u32, semi| {
+            layers[count] = (layer, color, semi);
+            count += 1;
+            let alpha = (semi && (layer != 0 || color & 255 != 255)) || (blend >> 6) & 3 == 1 && blend & (1 << layer) != 0;
+            count == 2 || mask & 32 == 0 || blend & 0x3f00 == 0 || !alpha
+        };
+        'p: for prio in 0..4u32 {
+            if let Some((sp, c, semi)) = sprites[x] {
+                if mask & 16 != 0 && sp as u32 == prio && add(4, c, semi) {
+                    break 'p;
+                }
+            }
+            for bg in 0..4usize {
+                if mask & (1 << bg) == 0 {
+                    continue;
+                }
+                if bg == 0 && d & 8 != 0 && d & 0x100 != 0 && self.r16(8) & 3 == prio {
+                    if let Some(a) = three_d {
+                        if add(0, a, true) {
+                            break 'p;
+                        }
+                    }
+                    continue;
+                }
+                if d & (0x100 << bg) != 0 && self.r16(8 + 2 * bg) & 3 == prio {
+                    if let Some(c) = self.background_pixel(bg, x, y) {
+                        if add(bg, c, false) {
+                            break 'p;
+                        }
+                    }
+                }
+            }
+        }
+        layers
+    }
+
+    /// `render`'s blend of a two-layer stack (before master brightness). `d`: DISPCNT; `mask`: window mask.
+    fn blend_stack(&self, d: u32, mask: u32, layers: [(usize, u32, bool); 2]) -> u32 {
+        let blend = self.r16(0x50);
+        let coefficients = self.r16(0x52);
+        let ((first, color, semi), (second, behind, _)) = (layers[0], layers[1]);
+        let mut best = color | 255;
+        if mask & 32 != 0 {
+            let mode = (blend >> 6) & 3;
+            let target = blend & (1 << first) != 0;
+            if (semi || mode == 1 && target) && blend & (0x100 << second) != 0 {
+                let (ea, eb, divisor) = if first == 0 && d & 8 != 0 {
+                    (color & 255, 255 - (color & 255), 255)
+                } else {
+                    ((coefficients & 31).min(16), ((coefficients >> 8) & 31).min(16), 16)
+                };
+                let channel = |shift: u32| ((((color >> shift) & 255u32) * ea + ((behind >> shift) & 255) * eb) / divisor).min(255);
+                best = channel(24) << 24 | channel(16) << 16 | channel(8) << 8 | 255;
+            } else if target && matches!(mode, 2 | 3) {
+                best = brighten(color, mode, (self.r16(0x54) & 31).min(16));
+            }
+        }
+        best
+    }
+
+    /// The screen with its 3D layer left open, so the 3D can be drawn elsewhere (another resolution, the GPU) and
+    /// combined afterwards by [`Split::compose`] or the GPU compositor. `Split::compose(layer3d)` equals `render()`
+    /// with the same `layer3d`.
+    pub fn render_split(&self) -> Split {
+        let d = self.dispcnt();
+        let blend = self.r16(0x50);
+        let coefficients = self.r16(0x52);
+        let master = self.r16(0x6c);
+        let mut split = Split {
+            base: vec![0xFFFF_FFFFu32; W * H],
+            info: vec![0u8; W * H],
+            other: vec![0u32; W * H],
+            eva: (coefficients & 31).min(16),
+            evb: ((coefficients >> 8) & 31).min(16),
+            bright: ((blend >> 6) & 3, (self.r16(0x54) & 31).min(16)),
+            master: (master >> 14, (master & 31).min(16)),
+        };
+        let mode = (d >> 16) & 3;
+        if mode == 0 || d & 0x80 != 0 {
+            split.master = (0, 0);
+            return split; // display off / forced blank: white, no 3D
+        }
+        if mode != 1 {
+            split.base.fill(0);
+            split.master = (0, 0);
+            return split; // VRAM / main-memory display: not supported here
+        }
+        let three_d_on = d & 8 != 0 && d & 0x100 != 0;
+        let blend_mode = (blend >> 6) & 3;
+        for y in 0..H {
+            let sprites = if d & 0x1000 != 0 { self.sprites_line(y, false) } else { [None; W] };
+            let object_window = if d & 0x9000 == 0x9000 { self.sprites_line(y, true) } else { [None; W] };
+            for x in 0..W {
+                let i = y * W + x;
+                let mask = self.window_mask(d, x, y, object_window[x].is_some());
+                split.base[i] = self.blend_stack(d, mask, self.stack(d, x, y, &sprites, mask, None));
+                if !three_d_on || mask & 1 == 0 {
+                    continue;
+                }
+                // Where would a translucent 3D pixel sit, and what is next to it?
+                let with = self.stack(d, x, y, &sprites, mask, Some(0x80));
+                let effects = mask & 32 != 0;
+                if with[0].0 == 0 {
+                    // 3D on top. Translucent: `render` collected the real layer behind it. Opaque: `render` stops at
+                    // the 3D pixel, so "behind" is the backdrop and any blend returns the 3D colour itself.
+                    let (second, behind) = (with[1].0, with[1].1);
+                    let translucent_blends = effects && blend & (0x100 << second) != 0;
+                    let opaque_blends = effects && blend & (0x100 << 5) != 0;
+                    let brightens = effects && blend & 1 != 0 && matches!(blend_mode, 2 | 3);
+                    split.info[i] = 1 | (translucent_blends as u8) << 2 | (opaque_blends as u8) << 3 | (brightens as u8) << 4;
+                    split.other[i] = behind;
+                } else if with[1].0 == 0 {
+                    // 3D directly under the top layer: either they blend, or the top layer shows with a result that
+                    // may differ from `base` (whose second layer is what lies under the 3D).
+                    let (first, color, semi) = with[0];
+                    let target = blend & (1 << first) != 0;
+                    if effects && (semi || blend_mode == 1 && target) && blend & 0x100 != 0 {
+                        split.info[i] = 2;
+                        split.other[i] = color;
+                    } else {
+                        split.info[i] = 3;
+                        split.other[i] = self.blend_stack(d, mask, [with[0], (0, 0, true)]);
+                    }
+                }
+            }
+        }
+        split
+    }
+
     /// Render the whole screen as packed `0xRRGGBBAA`.
     pub fn render(&self) -> Vec<u32> {
         let d = self.dispcnt();
@@ -465,6 +603,75 @@ impl Engine2d<'_> {
     }
 }
 
+/// Brightness up (`mode` 2) or down (3) of a packed colour by `amount`/16, as BLDCNT / BLDY do.
+fn brighten(color: u32, mode: u32, amount: u32) -> u32 {
+    let channel = |shift: u32| {
+        let value = (color >> shift) & 255;
+        if mode == 2 { value + (255 - value) * amount / 16 } else { value - value * amount / 16 }
+    };
+    channel(24) << 24 | channel(16) << 16 | channel(8) << 8 | 255
+}
+
+/// One engine's screen with the 3D layer left open (see [`Engine2d::render_split`]). Everything is at 256x192; the
+/// 3D layer may be sampled at any resolution, each 3D sample combining with the record of the DS pixel it lies in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Split {
+    /// The colour wherever no 3D pixel shows (packed `0xRRGGBBAA`, before master brightness).
+    pub base: Vec<u32>,
+    /// Per pixel, bits 0-1: 0 = a 3D pixel here is hidden; 1 = it is on top; 2 = it blends under the layer above
+    /// (`other`) with `eva`/`evb`; 3 = it makes the layers above show as `other`. For 1: bit 2 = a translucent 3D pixel
+    /// blends with `other` (the layer behind it) by its alpha, bit 3 = an opaque one counts as blended (no
+    /// brightness), bit 4 = brightness (`bright`) applies when it does not blend.
+    pub info: Vec<u8>,
+    pub other: Vec<u32>,
+    pub eva: u32,
+    pub evb: u32,
+    /// BLDCNT mode (2 = up, 3 = down) and BLDY amount.
+    pub bright: (u32, u32),
+    /// MASTER_BRIGHT mode (1 = up, 2 = down) and factor, applied last.
+    pub master: (u32, u32),
+}
+
+impl Split {
+    /// The colour of one sample: DS pixel `i` with the 3D sample `c3` (packed `0xRRGGBBAA`, alpha 0 = none).
+    /// The GPU compositor's shader is this function; keep them in step.
+    pub fn pixel(&self, i: usize, c3: u32) -> u32 {
+        let info = self.info[i] as u32;
+        let a3 = c3 & 255;
+        let other = self.other[i];
+        let mut c = match info & 3 {
+            _ if a3 == 0 => self.base[i],
+            0 => self.base[i],
+            1 => {
+                let blends = if a3 == 255 { info & 8 != 0 } else { info & 4 != 0 };
+                if blends {
+                    // An opaque pixel gives `other` weight 0: the 3D colour itself, but no brightness.
+                    let ch = |s: u32| ((((c3 >> s) & 255) * a3 + ((other >> s) & 255) * (255 - a3)) / 255).min(255);
+                    ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | 255
+                } else if info & 16 != 0 {
+                    brighten(c3, self.bright.0, self.bright.1)
+                } else {
+                    c3 | 255
+                }
+            }
+            2 => {
+                let ch = |s: u32| ((((other >> s) & 255) * self.eva + ((c3 >> s) & 255) * self.evb) / 16).min(255);
+                ch(24) << 24 | ch(16) << 16 | ch(8) << 8 | 255
+            }
+            _ => other,
+        };
+        if matches!(self.master.0, 1 | 2) && self.master.1 != 0 {
+            c = brighten(c, if self.master.0 == 1 { 2 } else { 3 }, self.master.1);
+        }
+        c
+    }
+
+    /// The finished screen at 256x192 from a 3D layer of the same size (the software path).
+    pub fn compose(&self, layer3d: Option<&[u32]>) -> Vec<u32> {
+        (0..W * H).map(|i| self.pixel(i, layer3d.map_or(0, |l| l[i]))).collect()
+    }
+}
+
 /// Render engine `engine` (0 = A, 1 = B) from the live memory model.
 pub fn render_bus(hw: &mut crate::ds_mem::Bus, engine: usize) -> Vec<u32> {
     render_bus_with_3d(hw, engine, None)
@@ -484,6 +691,19 @@ pub(crate) fn render_memory(
     io: &[u8], palette: &[u8], oam_bytes: &[u8], vram: &[Vec<u8>],
     engine: usize, layer3d: Option<&[u32]>,
 ) -> Vec<u32> {
+    with_engine(io, palette, oam_bytes, vram, engine, layer3d, |e| e.render())
+}
+
+/// As [`render_memory`], with the 3D layer left open ([`Engine2d::render_split`]).
+pub(crate) fn split_memory(io: &[u8], palette: &[u8], oam_bytes: &[u8], vram: &[Vec<u8>], engine: usize) -> Split {
+    with_engine(io, palette, oam_bytes, vram, engine, None, |e| e.render_split())
+}
+
+/// Builds engine `engine` over borrowed GPU memory and hands it to `f`.
+fn with_engine<R>(
+    io: &[u8], palette: &[u8], oam_bytes: &[u8], vram: &[Vec<u8>],
+    engine: usize, layer3d: Option<&[u32]>, f: impl FnOnce(&Engine2d) -> R,
+) -> R {
     let io_off = if engine == 0 { 0 } else { 0x1000 };
     let regs: Vec<u8> = (0..0x70).map(|i| io[io_off + i]).collect();
     let pal: Vec<u8> = palette[engine * 0x400..engine * 0x400 + 0x400].to_vec();
@@ -527,7 +747,7 @@ pub(crate) fn render_memory(
             .copied()
             .unwrap_or(0)
     };
-    Engine2d {
+    f(&Engine2d {
         regs: &regs,
         vram: &read,
         bg_base: bg,
@@ -537,8 +757,7 @@ pub(crate) fn render_memory(
         layer3d,
         ext_bg: Some(&ext_bg),
         ext_obj: Some(&ext_obj),
-    }
-    .render()
+    })
 }
 
 /// Extended palettes are GPU mappings, not CPU BG/OBJ VRAM windows.
@@ -673,6 +892,60 @@ mod tests {
     }
     fn set16(r: &mut [u8], off: usize, v: u16) {
         r[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// `render_split` + `Split::compose` must equal `render` for any registers, sprites and 3D layer: random
+    /// blend modes, coefficients, windows, master brightness, layer priorities and 3D pixels (none, opaque,
+    /// translucent), with garbage VRAM and OAM so every layer shows something.
+    #[test]
+    fn split_then_compose_equals_render_for_random_screens() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let vram_seed = next();
+        let read = move |a: u32| ((a as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ vram_seed).rotate_left(a & 31) as u8;
+        for case in 0..60 {
+            let mut r = vec![0u8; 0x70];
+            for b in r.iter_mut() {
+                *b = next() as u8;
+            }
+            let set = |r: &mut Vec<u8>, off: usize, v: u32| r[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes());
+            let dispcnt = (1 << 16) | 8 | (next() as u32 & 0xff00) | 0x100; // graphics mode, BG0 = 3D, BG0 on
+            r[..4].copy_from_slice(&(dispcnt & !0x87).to_le_bytes()); // mode 0 text BGs, no forced blank
+            set(&mut r, 0x6c, match case % 4 { 0 => 0, 1 => 0x4000 | 9, 2 => 0x8000 | 16, _ => next() as u32 });
+            let pal: Vec<u8> = (0..1024).map(|_| next() as u8).collect();
+            let oam: Vec<u8> = (0..1024).map(|_| next() as u8).collect();
+            let layer: Vec<u32> = (0..W * H)
+                .map(|_| {
+                    let v = next();
+                    let rgb = (v as u32) & 0xffff_ff00;
+                    match v >> 62 {
+                        0 => 0,
+                        1 => rgb | 255,
+                        _ => rgb | ((v >> 40) as u32 % 254 + 1),
+                    }
+                })
+                .collect();
+            let engine = |layer3d| Engine2d {
+                regs: &r,
+                vram: &read,
+                bg_base: 0x0600_0000,
+                obj_base: 0x0640_0000,
+                pal: &pal,
+                oam: &oam,
+                layer3d,
+                ext_bg: None,
+                ext_obj: None,
+            };
+            let want = engine(Some(&layer)).render();
+            let got = engine(None).render_split().compose(Some(&layer));
+            let bad = want.iter().zip(&got).position(|(a, b)| a != b);
+            assert!(bad.is_none(), "case {case}: pixel {bad:?} differs ({:08x} vs {:08x})", want[bad.unwrap()], got[bad.unwrap()]);
+        }
     }
 
     fn pal_with(entries: &[(usize, u16)]) -> Vec<u8> {

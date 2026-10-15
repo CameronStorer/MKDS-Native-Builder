@@ -8,12 +8,13 @@
 //! (0 left, 64 centre, 127 right), PSG duty 24-26, repeat 27-28 (0 manual, 1 loop, 2 one-shot),
 //! format 29-30 (0 PCM8, 1 PCM16, 2 ADPCM, 3 PSG/noise), start/busy 31.
 //!
-//! Output is produced at [`SAMPLE_RATE`] by [`Spu::render`], which reads sample data from memory through
+//! Output defaults to [`SAMPLE_RATE`] and is produced at the configured output rate by [`Spu::render`], which reads sample data from memory through
 //! [`Mem`]. The channel timer runs at half the system clock (16.757 MHz): a channel advances one sample
 //! every `0x10000 - TMR` timer ticks. Capture units and the exact analogue output stage (bias, low-pass)
 //! are not modelled. Nothing here comes from the game.
 use crate::rt::Mem;
 
+/// The DS mixing rate, also the default host output rate.
 pub const SAMPLE_RATE: u32 = 32_768;
 /// Channel timer clock (system clock / 2).
 const TIMER_HZ: u64 = 16_756_991;
@@ -73,8 +74,9 @@ pub struct Spu {
     pub ch: [Channel; 16],
     pub soundcnt: u16,
     pub bias: u16,
-    /// Output sample position accumulator (timer ticks per output sample, as a fraction of `SAMPLE_RATE`).
+    /// Output sample position accumulator (timer ticks per output sample, as a fraction of `output_rate`).
     frac: u64,
+    output_rate: u32,
     /// Diagnostics: channel starts seen, per channel.
     pub starts: [u32; 16],
 }
@@ -87,7 +89,19 @@ impl Default for Spu {
 
 impl Spu {
     pub fn new() -> Spu {
-        Spu { ch: [Channel::default(); 16], soundcnt: 0, bias: 0x200, frac: 0, starts: [0; 16] }
+        Spu { ch: [Channel::default(); 16], soundcnt: 0, bias: 0x200, frac: 0, output_rate: SAMPLE_RATE, starts: [0; 16] }
+    }
+
+    /// Configure the host rate. Call before rendering; zero is not a valid rate.
+    /// A live change preserves channel state and the fractional timer phase (to one timer tick).
+    pub fn set_output_rate(&mut self, hz: u32) {
+        assert!(hz > 0, "audio output rate must be nonzero");
+        self.frac = self.frac * hz as u64 / self.output_rate as u64;
+        self.output_rate = hz;
+    }
+
+    pub fn output_rate(&self) -> u32 {
+        self.output_rate
     }
 
     pub fn read(&self, off: u32) -> Option<u32> {
@@ -161,7 +175,7 @@ impl Spu {
         // the first sample is fetched on the first timer tick; ADPCM reads its header then
     }
 
-    /// Renders `frames` stereo samples at [`SAMPLE_RATE`].
+    /// Renders `frames` stereo samples at [`Self::output_rate`], holding each channel between timer steps.
     pub fn render(&mut self, mem: &mut dyn Mem, frames: usize) -> Vec<[i16; 2]> {
         let mut out = Vec::with_capacity(frames);
         let enabled = self.soundcnt & 0x8000 != 0;
@@ -169,8 +183,8 @@ impl Spu {
         for _ in 0..frames {
             // timer ticks that elapse during one output sample
             self.frac += TIMER_HZ;
-            let ticks = self.frac / SAMPLE_RATE as u64;
-            self.frac %= SAMPLE_RATE as u64;
+            let ticks = self.frac / self.output_rate as u64;
+            self.frac %= self.output_rate as u64;
             let (mut l, mut r) = (0i64, 0i64);
             for n in 0..16 {
                 let c = &mut self.ch[n];
@@ -350,6 +364,136 @@ mod tests {
         spu.write(base + 8, TMR_1X as u32 | (pnt as u32) << 16, 4);
         spu.write(base + 0xC, len, 4);
         spu.write(base, cnt | 0x8000_0000, 4);
+    }
+
+    // Slow enough that neither output grid can miss a timer transition.
+    const TEST_PERIOD: u64 = 4096;
+
+    fn rate_fixture(format: u32, rate: u32, repeat: u32) -> (Spu, M, usize) {
+        let mut m = M::default();
+        for i in 0..32 {
+            m.w8(0x100 + i, if i % 8 < 4 { 64 } else { 192 });
+        }
+        if format == 1 {
+            for i in 0..16 {
+                m.w16(0x100 + i * 2, if i % 8 < 4 { 16000 } else { (-16000i16) as u16 });
+            }
+        } else if format == 2 {
+            m.w32(0x100, 60 << 16);
+            for i in 4..32 {
+                m.w8(0x100 + i, if i % 4 < 2 { 0x77 } else { 0xff });
+            }
+        }
+        let n = match format { 3 => 8, 4 => 14, _ => 0 };
+        let mut s = Spu::new();
+        s.set_output_rate(rate);
+        setup(&mut s, n as u32, 127 | 3 << 24 | format.min(3) << 29 | repeat << 27,
+            0x100, 1, 7);
+        s.ch[n].tmr = (65536 - TEST_PERIOD) as u16;
+        (s, m, n)
+    }
+
+    #[test]
+    fn all_formats_preserve_crossings_and_rms_at_device_rate() {
+        for format in 0..5 {
+            let measure = |rate| {
+                let (mut s, mut m, _) = rate_fixture(format, rate, 1);
+                let out = s.render(&mut m, rate as usize);
+                let crossings = out.windows(2).filter(|w| w[0][0] < 0 && w[1][0] >= 0).count();
+                let rms = (out.iter().map(|v| (v[0] as f64).powi(2)).sum::<f64>() / rate as f64).sqrt();
+                (crossings as f64, rms)
+            };
+            let (f0, r0) = measure(SAMPLE_RATE);
+            let (f1, r1) = measure(48000);
+            // Noise has no single fundamental: its transition count measures the same LFSR sequence.
+            assert!(f0 > 0.0 && (f1 / f0 - 1.0).abs() <= 0.001, "format {format}: {f0}, {f1}");
+            assert!((r1 / r0 - 1.0).abs() <= 0.01, "format {format}: RMS {r0}, {r1}");
+        }
+    }
+
+    #[test]
+    fn one_shots_and_loops_follow_timer_time() {
+        for format in 0..3 {
+            let steps = match format { 0 => 32, 1 => 16, _ => 56 };
+            let event_ticks = (steps + 1) * TEST_PERIOD;
+            for rate in [SAMPLE_RATE, 48000] {
+                let event_frame = (event_ticks * rate as u64).div_ceil(TIMER_HZ) as usize;
+                for repeat in [1, 2] {
+                    let (mut s, mut m, n) = rate_fixture(format, rate, repeat);
+                    s.render(&mut m, event_frame - 1);
+                    assert!(s.ch[n].playing());
+                    assert_eq!(s.ch[n].pos, 0x120);
+                    s.render(&mut m, 1);
+                    if repeat == 2 {
+                        assert!(!s.ch[n].playing(), "format {format} at {rate}");
+                    } else {
+                        assert!(s.ch[n].playing());
+                        assert_eq!(s.ch[n].pos, match format { 0 => 0x105, 1 => 0x106, _ => 0x104 });
+                    }
+                    let time = event_frame as f64 / rate as f64;
+                    let exact = event_ticks as f64 / TIMER_HZ as f64;
+                    assert!(time >= exact && time - exact < 1.0 / rate as f64);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn psg_duties_and_noise_are_clocked_by_timer_not_output() {
+        for rate in [SAMPLE_RATE, 44100, 48000, 96000] {
+            for duty in 0..8 {
+                let (mut s, mut m, n) = rate_fixture(3, rate, 1);
+                s.ch[n].cnt = (s.ch[n].cnt & !(7 << 24)) | duty << 24;
+                for frame in 1..=rate / 10 {
+                    s.render(&mut m, 1);
+                    let steps = frame as u64 * TIMER_HZ / (rate as u64 * TEST_PERIOD);
+                    assert_eq!(s.ch[n].sample_index as u64, steps);
+                    let expected = if steps == 0 { 0 } else if duty != 7 && (steps - 1) % 8 <= duty as u64 { 32767 } else { -32767 };
+                    assert_eq!(s.ch[n].cur, expected);
+                }
+            }
+            let (mut s, mut m, n) = rate_fixture(4, rate, 1);
+            let (mut lfsr, mut done) = (0x7fff_u16, 0);
+            for frame in 1..=rate {
+                s.render(&mut m, 1);
+                let steps = frame as u64 * TIMER_HZ / (rate as u64 * TEST_PERIOD);
+                while done < steps {
+                    lfsr = (lfsr >> 1) ^ if lfsr & 1 != 0 { 0x6000 } else { 0 };
+                    done += 1;
+                }
+                assert_eq!(s.ch[n].lfsr, lfsr);
+            }
+            assert_eq!(s.frac, 0, "no fractional drift after one second");
+        }
+    }
+
+    #[test]
+    fn rate_and_chunk_changes_preserve_timer_phase() {
+        let (mut s, mut m, _) = rate_fixture(3, SAMPLE_RATE, 1);
+        s.render(&mut m, SAMPLE_RATE as usize / 2);
+        s.set_output_rate(48000);
+        for _ in 0..100 { s.render(&mut m, 240); }
+        assert_eq!(s.ch[8].sample_index as u64, TIMER_HZ / TEST_PERIOD);
+        assert_eq!(s.ch[8].acc, TIMER_HZ % TEST_PERIOD);
+        assert_eq!(s.frac, 0);
+    }
+
+    #[test]
+    #[ignore = "manual CPU timing; no audio device or game"]
+    fn benchmark_device_rate_mixing() {
+        for rate in [SAMPLE_RATE, 48000] {
+            let (mut s, mut m, _) = rate_fixture(0, rate, 1);
+            for n in 0..16 {
+                let (other, _, source) = rate_fixture((n % 3) as u32, rate, 1);
+                s.ch[n] = other.ch[source];
+                s.ch[n].tmr = TMR_1X;
+            }
+            let begin = std::time::Instant::now();
+            for _ in 0..100 {
+                std::hint::black_box(s.render(&mut m, rate as usize));
+            }
+            eprintln!("{rate} Hz: {:.3} ms CPU wall time per second of 16-channel audio", begin.elapsed().as_secs_f64() * 10.0);
+        }
     }
 
     #[test]

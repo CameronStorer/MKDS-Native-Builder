@@ -3,3 +3,4 @@ pub mod controls;
 pub mod extract;
 pub mod rip;
 pub mod rom;
+pub mod settings;

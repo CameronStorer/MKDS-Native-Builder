@@ -50,7 +50,7 @@ On Debian/Ubuntu Linux:
 
 ```sh
 sudo apt-get update
-sudo apt-get install build-essential pkg-config curl ca-certificates libasound2-dev \
+sudo apt-get install build-essential pkg-config curl ca-certificates libasound2-dev libudev-dev \
   libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev \
   libwayland-dev libxkbcommon-dev
 ```
@@ -115,6 +115,18 @@ compiler artifacts under `1_build_tool/target/<OS>-<architecture>`.
 | **Right Shift** | Select | |
 | **Left mouse button** (on the lower screen) | Touch screen | |
 | **Esc** | | Quit |
+| **F11** | | Fullscreen on/off |
+
+**Game controllers** (Xbox, PlayStation, Switch Pro and most others) work too: plug one in before starting the game.
+
+| Controller | DS button |
+|---|---|
+| **A** (bottom face button) or **right trigger** | A (accelerate) |
+| **B** (right face button) or **left trigger** | B (brake) |
+| **Y** / **X** (top / left face buttons) | X / Y |
+| **Left / right bumper** | L (item) / R (drift) |
+| **D-pad** or **left stick** | D-pad |
+| **Start** / **Back (View)** | Start / Select |
 
 ### Changing the controls
 
@@ -134,6 +146,45 @@ Semicolon Slash`, `NumPad0`-`NumPad9 NumPadDot NumPadSlash NumPadAsterisk NumPad
 `CapsLock NumLock ScrollLock Pause Menu`. Changes apply the next time the game starts, and the file survives rebuilds.
 If the file has a mistake, the game says which line; delete the file to get the default controls back.
 To use a different file once: `play.bat --controls "C:\path\to\controls.txt"`.
+
+Controller buttons have their own lines, starting with `Pad`: for example `Pad L = LB, RT`. Names are by position, so they
+work for any controller: `South East North West` (face buttons; South is Xbox A / PlayStation Cross), `LB RB LT RT`,
+`Start Select`, `DPadUp DPadDown DPadLeft DPadRight`, `StickUp StickDown StickLeft StickRight` (left stick),
+`LeftStick RightStick` (pressed in) and `Guide`. Files without `Pad` lines use the controller layout above.
+
+---
+
+## Display
+
+The 3D graphics and both screens are drawn by your **graphics card** (Direct3D 12 or Vulkan on Windows, Vulkan on Linux,
+Metal on macOS), at a higher resolution than the DS's 256 x 192 so the 3D looks sharp on modern monitors. The window can be
+resized and made fullscreen (F11).
+
+Double-click `mkds.bat` and choose **Display settings**, or edit `settings.txt` (in the same folder as `controls.txt`):
+
+| Setting | Values | What it does |
+|---|---|---|
+| `Renderer` | `GPU` (default), `Software` | `Software` draws everything on the CPU, exactly like the first version |
+| `Scale` | `Auto` (default), `1`-`8` | 3D sharpness as a multiple of 256 x 192. `Auto` picks the sharpest that fits the window, up to 4x |
+| `Filter` | `Sharp` (default), `Smooth` | How the screens look when stretched to the window |
+| `Layout` | `Stacked` (default), `SideBySide` | Top screen above the bottom one, or next to it for wide monitors |
+| `Fullscreen` | `No` (default), `Yes` | Start in fullscreen |
+
+For one run, `play.bat --renderer software` or `play.bat --scale 4` override the file. Graphics cards without compute
+shaders (very old ones) automatically fall back to drawing on the CPU.
+
+### Texture packs
+
+The GPU renderer can save every texture the game uses and load replacements, for example sharper hand-made or upscaled
+versions:
+
+1. In `settings.txt`, set `DumpTextures = C:\MKDS textures\dump` and play: each texture is saved once as `<id>.png`.
+2. Edit or upscale the PNGs you want. A replacement must be the original size times a whole number from 1 to 8 (for example
+   a 64 x 32 texture can become 256 x 128). Keep the file names.
+3. Put the replacements in a folder and set `TexturePack = C:\MKDS textures\pack` (and `DumpTextures =` to stop dumping).
+
+A replacement with the wrong size is ignored with a message naming the file. Dumped textures come from your copy of the game:
+do not share them.
 
 ---
 
@@ -209,8 +260,9 @@ Game options (after `play.exe` or `play`): `--mute`, `--stats` (prints speed and
    input, timers) on your PC.
 5. **Package** - `play.exe`, `game.exe`, `assets\`, `source\` and the fingerprints are placed in the output folder.
 
-No instruction is emulated at run time: the shipped game contains no interpreter. The DS graphics and sound chips are still recreated
-in software (that is why it uses some CPU); moving them to the graphics card is the next milestone.
+No instruction is emulated at run time: the shipped game contains no interpreter. The 3D graphics and the final screens are drawn
+by your graphics card at a higher resolution, and the sound channels are mixed straight at your audio device's rate. The 2D
+layers (backgrounds and sprites) are still decoded on the CPU at the DS's resolution, as the game's code drives them.
 
 Research notes and progress: **https://docs.cameronstorer.com/mkds-decomp-docs/**
 
@@ -222,8 +274,10 @@ Research notes and progress: **https://docs.cameronstorer.com/mkds-decomp-docs/*
   audio quality, and performance across other Linux desktops have not been validated. WSLg emitted nonfatal
   Wayland decoration/cleanup warnings during the smoke test.
 - macOS: native build path and setup instructions provided; not tested on a Mac.
-- Existing Windows testing: menus, Grand Prix races (Mushroom, Flower, Shell cups), Mission 1-1, Battle mode, full races through the results screen;
-  real-time speed and clean audio on a 6-core PC.
+- Windows: menus, Grand Prix races (Mushroom, Flower, Shell cups), Mission 1-1, Battle mode, full races through the results screen;
+  real-time speed and clean audio on a 6-core PC. GPU renderer (block 2): checked against the CPU renderer on 549 recorded frames
+  (99.99% identical pixels; the differences are single edge pixels) and played at 60 frames per second with sound on an RTX 2060.
+  The GPU renderer and controllers have not been tested on Linux or macOS yet.
 - Known issues: occasional stutter, the race position badge can show the wrong number, rare visual glitches, the in-game keyboard
   may repeat keys.
 

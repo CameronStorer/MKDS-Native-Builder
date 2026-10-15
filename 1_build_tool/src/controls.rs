@@ -33,16 +33,37 @@ pub const KEYS: [&str; 106] = [
     "LeftAlt", "RightAlt", "LeftSuper", "RightSuper",
 ];
 
-/// Keys per action (indexes into [`KEYS`]); an action may have several keys or none.
+/// Game controller buttons (positions, so `South` is Xbox A / PlayStation Cross / Nintendo B). `Stick*` is the left
+/// stick pushed past half way. The game maps them to `gilrs` buttons and axes in this order.
+pub const PAD: [&str; 21] = [
+    "South", "East", "North", "West", "LB", "RB", "LT", "RT", "Select", "Start", "DPadUp", "DPadDown", "DPadLeft",
+    "DPadRight", "StickUp", "StickDown", "StickLeft", "StickRight", "LeftStick", "RightStick", "Guide",
+];
+const PAD_DEFAULTS: [&[&str]; 13] = [
+    &["South", "RT"], &["East", "LT"], &["Select"], &["Start"], &["DPadRight", "StickRight"], &["DPadLeft", "StickLeft"],
+    &["DPadUp", "StickUp"], &["DPadDown", "StickDown"], &["RB"], &["LB"], &["North"], &["West"], &[],
+];
+
+/// Keys per action (indexes into [`KEYS`]) and controller buttons per action (indexes into [`PAD`]); an action may
+/// have several or none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Controls {
     pub keys: [Vec<usize>; 13],
+    pub pad: [Vec<usize>; 13],
 }
 
 impl Default for Controls {
     fn default() -> Self {
-        Self { keys: DEFAULTS.map(|names| names.iter().map(|n| key_index(n).unwrap()).collect()) }
+        Self {
+            keys: DEFAULTS.map(|names| names.iter().map(|n| key_index(n).unwrap()).collect()),
+            pad: PAD_DEFAULTS.map(|names| names.iter().map(|n| pad_index(n).unwrap()).collect()),
+        }
     }
+}
+
+/// A controller button's index in [`PAD`], in any letter case.
+pub fn pad_index(name: &str) -> Option<usize> {
+    PAD.iter().position(|k| k.eq_ignore_ascii_case(name.trim()))
 }
 
 /// The canonical name's index for a key name in any letter case (`z`, `rightshift`, also `0`-`9`).
@@ -56,7 +77,7 @@ pub fn key_index(name: &str) -> Option<usize> {
 impl Controls {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut out = Self::default();
-        let mut seen = [false; 13];
+        let mut seen = [[false; 13]; 2];
         for (n, line) in text.lines().enumerate() {
             let (n, line) = (n + 1, line.split('#').next().unwrap_or("").trim()); // `# ...` is a comment
             if line.is_empty() {
@@ -64,15 +85,27 @@ impl Controls {
             }
             let (action, keys) = line.split_once('=').ok_or_else(|| format!("line {n}: expected `Button = Key`"))?;
             let action = action.trim();
-            let a = ACTIONS.iter().position(|x| x.eq_ignore_ascii_case(action)).ok_or_else(|| {
-                format!("line {n}: unknown button `{action}` (buttons: {})", ACTIONS.join(", "))
+            // `Pad A = South` sets the controller; `A = Z` the keyboard.
+            let (pad, name) = match action.get(..4) {
+                Some(p) if p.eq_ignore_ascii_case("pad ") => (true, action[4..].trim()),
+                _ => (false, action),
+            };
+            let a = ACTIONS.iter().position(|x| x.eq_ignore_ascii_case(name)).ok_or_else(|| {
+                format!("line {n}: unknown button `{action}` (buttons: {}; controller lines start with `Pad `)", ACTIONS.join(", "))
             })?;
-            if std::mem::replace(&mut seen[a], true) {
-                return Err(format!("line {n}: `{}` is listed twice", ACTIONS[a]));
+            if std::mem::replace(&mut seen[pad as usize][a], true) {
+                return Err(format!("line {n}: `{}{}` is listed twice", if pad { "Pad " } else { "" }, ACTIONS[a]));
             }
-            out.keys[a] = keys.split(',').map(str::trim).filter(|k| !k.is_empty()).map(|k| {
-                key_index(k).ok_or_else(|| format!("line {n}: unknown key `{k}` (key names are listed in README.md)"))
-            }).collect::<Result<_, _>>()?;
+            let entries = keys.split(',').map(str::trim).filter(|k| !k.is_empty());
+            if pad {
+                out.pad[a] = entries
+                    .map(|k| pad_index(k).ok_or_else(|| format!("line {n}: unknown controller button `{k}` (names: {})", PAD.join(", "))))
+                    .collect::<Result<_, _>>()?;
+            } else {
+                out.keys[a] = entries
+                    .map(|k| key_index(k).ok_or_else(|| format!("line {n}: unknown key `{k}` (key names are listed in README.md)")))
+                    .collect::<Result<_, _>>()?;
+            }
         }
         Ok(out)
     }
@@ -85,15 +118,23 @@ impl Controls {
              # LeftShift, RightShift, LeftCtrl, RightCtrl, LeftAlt, RightAlt, NumPad0-NumPad9 (full list in README.md).\n\
              # Edit this file, or run mkds.bat and choose \"Change controls\". Delete it to get the defaults back.\n\n",
         );
-        for (a, keys) in self.keys.iter().enumerate() {
-            let names: Vec<&str> = keys.iter().map(|&k| KEYS[k]).collect();
-            let line = format!("{} = {}", ACTIONS[a], names.join(", "));
-            if ROLES[a].is_empty() {
-                s += &format!("{}\n", line.trim_end());
-            } else {
-                s += &format!("{:<24}# {}\n", line, ROLES[a]);
+        let section = |s: &mut String, prefix: &str, lists: &[Vec<usize>; 13], names: &[&str]| {
+            for (a, list) in lists.iter().enumerate() {
+                let entries: Vec<&str> = list.iter().map(|&k| names[k]).collect();
+                let line = format!("{prefix}{} = {}", ACTIONS[a], entries.join(", "));
+                if ROLES[a].is_empty() {
+                    *s += &format!("{}\n", line.trim_end());
+                } else {
+                    *s += &format!("{:<28}# {}\n", line, ROLES[a]);
+                }
             }
-        }
+        };
+        section(&mut s, "", &self.keys, &KEYS);
+        s += "\n# Game controller (Xbox, PlayStation, Switch Pro and others): `Pad Button = Name`.\n\
+              # Names: South East North West (face buttons by position: South is Xbox A), LB RB LT RT, Start Select,\n\
+              # DPadUp DPadDown DPadLeft DPadRight, StickUp StickDown StickLeft StickRight (left stick), LeftStick\n\
+              # RightStick (pressed in), Guide.\n";
+        section(&mut s, "Pad ", &self.pad, &PAD);
         s
     }
 
@@ -115,6 +156,14 @@ impl Controls {
             std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
         }
         std::fs::write(path, self.to_text()).map_err(|e| format!("Cannot write {}: {e}", path.display()))
+    }
+
+    /// The controller buttons of `action` for display, e.g. `South, RT` or `(none)`.
+    pub fn describe_pad(&self, action: usize) -> String {
+        if self.pad[action].is_empty() {
+            return "(none)".into();
+        }
+        self.pad[action].iter().map(|&k| PAD[k]).collect::<Vec<_>>().join(", ")
     }
 
     /// The keys of `action` for display, e.g. `Z, Space` or `(none)`.
@@ -167,11 +216,24 @@ mod tests {
             ("A = Z\nJump = X", "line 2: unknown button `Jump`"),
             ("A = Zed", "line 1: unknown key `Zed`"),
             ("A = Z\na = X", "line 2: `A` is listed twice"),
+            ("Pad A = South\npad a = East", "line 2: `Pad A` is listed twice"),
+            ("Pad A = Triangle", "line 1: unknown controller button `Triangle`"),
             ("A Z", "line 1: expected"),
         ] {
             let e = Controls::parse(text).unwrap_err();
             assert!(e.starts_with(expect), "{e}");
         }
+    }
+
+    #[test]
+    fn controller_lines_are_separate_and_default_when_absent() {
+        let c = Controls::parse("A = Q\nPad L = RT, LB\n").unwrap();
+        assert_eq!(c.describe(0), "Q");
+        assert_eq!(c.describe_pad(0), "South, RT", "keyboard edits leave the controller alone");
+        assert_eq!(c.describe_pad(9), "RT, LB");
+        let old_file = Controls::parse("A = Z\nL = A\n").unwrap();
+        assert_eq!(old_file.pad, Controls::default().pad, "files from before controller support keep the defaults");
+        assert!(Controls::default().to_text().contains("Pad A = South, RT"));
     }
 
     #[test]
