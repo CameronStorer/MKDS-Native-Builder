@@ -2,9 +2,11 @@
 mod audio;
 pub mod assets;
 pub mod gpu;
+mod pad;
+pub mod window;
 mod script;
-use minifb::{Key, MouseButton, MouseMode, Scale, Window, WindowOptions};
 use mkds_builder::controls::{self, Controls};
+use window::HostLink;
 use recomp::{boot::session::Session, dispatch::Dispatcher, mem::Lifted, rt::Mem};
 use std::{
     cell::RefCell,
@@ -297,6 +299,21 @@ fn run_internal(
     if options.headless && options.instruction_limit.is_none() {
         return Err("Headless diagnostics require a finite instruction limit".into());
     }
+    if options.headless {
+        return emulate(rom, image, table, signatures, table7, &options, None, Bindings::from(&Controls::default()));
+    }
+    let bindings = load_bindings(&options)?;
+    let title = bindings.title.clone();
+    // The window needs the main thread; the game runs on a second one and meets it through `HostLink`.
+    window::run(&title, move |link| emulate(rom, image, table, signatures, table7, &options, Some(link), bindings))?
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emulate(
+    rom: &[u8], image: &[u8], table: &'static [Lifted],
+    signatures: &'static [recomp::residency::SegmentSig],
+    table7: Option<&'static [Lifted]>, options: &Options, window: Option<Arc<HostLink>>, bindings: Bindings,
+) -> Result<RunReport, String> {
     // Never pick the first of several overlapping overlays. Until residency is tracked,
     // they execute from actual guest memory via the interpreter and count as fallback.
     let resident: Vec<_> = table
@@ -333,31 +350,14 @@ fn run_internal(
         table.len(),
         signatures.len()
     );
-    let bindings = Rc::new(if options.headless { Bindings::from(&Controls::default()) } else { load_bindings(&options)? });
-    let window = if options.headless {
-        None
-    } else {
-        let mut w = Window::new(
-            &bindings.title,
-            256,
-            384,
-            WindowOptions {
-                scale: Scale::X2,
-                resize: false,
-                ..WindowOptions::default()
-            },
-        )
-        .map_err(|e| format!("Cannot open game window: {e}"))?;
-        w.set_target_fps(0);
-        Some(Rc::new(RefCell::new(w)))
-    };
+    let bindings = Rc::new(bindings);
+    let pads = Rc::new(RefCell::new(if window.is_some() { pad::Pads::new() } else { pad::Pads::none() }));
     let sound = if options.mute || options.headless {
         None
     } else {
         Some(audio::Output::new()?)
     };
     let start = Instant::now();
-    let last_pixels = Rc::new(RefCell::new(vec![0xffffffff; 256 * 384]));
     let idle_error = Rc::new(RefCell::new(None::<String>));
     if let Some(path) = &options.input_log {
         let mut log = std::io::BufWriter::new(std::fs::File::create(path)
@@ -377,27 +377,20 @@ fn run_internal(
         }));
     }
     if let Some(window) = &window {
-        let window = Rc::clone(window);
-        let pixels = Rc::clone(&last_pixels);
-        let error = Rc::clone(&idle_error);
+        let w = Arc::clone(window);
         let live_input = scripted.is_none();
         let bindings = Rc::clone(&bindings);
+        let pads = Rc::clone(&pads);
         let mut last_poll = Instant::now();
         session.machine.idle_poll = Some(Box::new(move || {
             if last_poll.elapsed() < Duration::from_millis(8) {
                 return None;
             }
             last_poll = Instant::now();
-            let mut w = window.borrow_mut();
-            if let Err(e) = w.update_with_buffer(&pixels.borrow(), 256, 384) {
-                *error.borrow_mut() = Some(format!("Display failed during guest wait: {e}"));
-                return Some(recomp::machine::IdleAction {
-                    quit: true,
-                    ..Default::default()
-                });
-            }
-            let quit = !w.is_open() || bindings.quit(&w);
-            let (buttons, touch) = if live_input { input(&mut w, &bindings) } else { (0, None) };
+            let mut pads = pads.borrow_mut();
+            pads.poll();
+            let quit = !w.is_open() || bindings.quit(&w, &pads);
+            let (buttons, touch) = if live_input { input(&w, &bindings, &pads) } else { (0, None) };
             Some(recomp::machine::IdleAction {
                 quit,
                 buttons: live_input.then_some(buttons),
@@ -410,7 +403,6 @@ fn run_internal(
     if let Some(dir) = &options.snapshots {
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     }
-    let mut last_present = start;
     let busy = Arc::new(AtomicBool::new(false));
     let renderer = window.is_some().then(|| spawn_renderer(busy.clone()));
     // Wall-clock time spent re-anchoring the schedule after a slow stretch (no catch-up sprint).
@@ -437,13 +429,14 @@ fn run_internal(
                     let snapshot = script.at(session.frame_number());
                     session.machine.set_input(snapshot.buttons, snapshot.touch);
                 }
-                if let Some(window) = window.as_ref() {
-                    let mut w = window.borrow_mut();
-                    if !w.is_open() || bindings.quit(&w) {
+                if let Some(w) = window.as_ref() {
+                    let mut pads = pads.borrow_mut();
+                    pads.poll();
+                    if !w.is_open() || bindings.quit(w, &pads) {
                         break;
                     }
                     if scripted.is_none() {
-                        let (buttons, touch) = input(&mut w, &bindings);
+                        let (buttons, touch) = input(w, &bindings, &pads);
                         session.machine.set_input(buttons, touch);
                     }
                 }
@@ -514,8 +507,7 @@ fn run_internal(
                 if let Some(sound) = &sound {
                     sound.push(samples)?;
                 }
-                if let Some(window) = window.as_ref() {
-                    let mut w = window.borrow_mut();
+                if let Some(w) = window.as_ref() {
                     let frame = session.frame_number();
                     let emulated = Duration::from_secs_f64(
                         session.machine.hw.cycles as f64 / recomp::ds_mem::BUS_HZ as f64,
@@ -541,7 +533,8 @@ fn run_internal(
                                     stats.parity_ok += 1;
                                 }
                             }
-                            *last_pixels.borrow_mut() = done.pixels;
+                            w.present(done.pixels);
+                            stats.presented += 1;
                         }
                     }
                     // Every new guest frame goes to the render worker as soon as it is idle. This must not
@@ -564,14 +557,6 @@ fn run_internal(
                             last_frame = frame;
                         }
                     }
-                    // Present at most ~70 Hz of wall time (this also pumps native events, even if
-                    // guest time is stuck in a boot wait).
-                    if last_present.elapsed() >= Duration::from_millis(14) {
-                        w.update_with_buffer(&last_pixels.borrow(), 256, 384)
-                            .map_err(|e| format!("Display failed: {e}"))?;
-                        stats.presented += 1;
-                        last_present = Instant::now();
-                    }
                     if options.stats {
                         stats.report(
                             emulated,
@@ -586,21 +571,12 @@ fn run_internal(
                     }
                     // Hold emulation to real time. One step can move guest time forward by many
                     // milliseconds (the guest idling on a load), so wait until the wall clock
-                    // catches up instead of sleeping a fixed 2 ms per step; keep the window alive.
+                    // catches up instead of sleeping a fixed 2 ms per step (the window has its own thread).
                     while let Some(ahead) = emulated.checked_sub(start.elapsed().saturating_sub(skew)) {
-                        if ahead < Duration::from_millis(1) {
+                        if ahead < Duration::from_millis(1) || !w.is_open() || bindings.quit(w, &pads.borrow()) {
                             break;
                         }
                         std::thread::sleep(ahead.min(Duration::from_millis(4)));
-                        if last_present.elapsed() >= Duration::from_millis(14) {
-                            if !w.is_open() || bindings.quit(&w) {
-                                break;
-                            }
-                            w.update_with_buffer(&last_pixels.borrow(), 256, 384)
-                                .map_err(|e| format!("Display failed: {e}"))?;
-                            stats.presented += 1;
-                            last_present = Instant::now();
-                        }
                     }
                 }
             }
@@ -703,36 +679,27 @@ thread_local! {
     static DPAD: std::cell::Cell<(u16, u16)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-/// Window keys for the DS buttons (bit order A B Select Start Right Left Up Down R L X Y) and for Quit.
+/// `controls.txt` keys (`controls::KEYS` indexes) for the DS buttons (bit order A B Select Start Right Left Up Down
+/// R L X Y) and for Quit.
 struct Bindings {
-    buttons: [Vec<Key>; 12],
-    quit_keys: Vec<Key>,
+    buttons: [Vec<usize>; 12],
+    quit_keys: Vec<usize>,
+    /// Controller buttons (`controls::PAD` indexes) per DS button, and for Quit.
+    pad: [Vec<usize>; 12],
+    quit_pad: Vec<usize>,
     title: String,
 }
 
-/// `minifb::Key` in declaration order, matching `mkds_builder::controls::KEYS` name for name.
-const KEYS: [Key; 106] = {
-    use Key::*;
-    [
-        Key0, Key1, Key2, Key3, Key4, Key5, Key6, Key7, Key8, Key9, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P,
-        Q, R, S, T, U, V, W, X, Y, Z, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, Down, Left,
-        Right, Up, Apostrophe, Backquote, Backslash, Comma, Equal, LeftBracket, Minus, Period, RightBracket,
-        Semicolon, Slash, Backspace, Delete, End, Enter, Escape, Home, Insert, Menu, PageDown, PageUp, Pause, Space,
-        Tab, NumLock, CapsLock, ScrollLock, LeftShift, RightShift, LeftCtrl, RightCtrl, NumPad0, NumPad1, NumPad2,
-        NumPad3, NumPad4, NumPad5, NumPad6, NumPad7, NumPad8, NumPad9, NumPadDot, NumPadSlash, NumPadAsterisk,
-        NumPadMinus, NumPadPlus, NumPadEnter, LeftAlt, RightAlt, LeftSuper, RightSuper,
-    ]
-};
-
 impl From<&Controls> for Bindings {
     fn from(c: &Controls) -> Self {
-        let keys = |a: usize| c.keys[a].iter().map(|&k| KEYS[k]).collect::<Vec<_>>();
         let hint = |a: usize| c.describe(a);
         Self {
-            buttons: std::array::from_fn(keys),
-            quit_keys: keys(controls::QUIT),
+            buttons: std::array::from_fn(|a| c.keys[a].clone()),
+            quit_keys: c.keys[controls::QUIT].clone(),
+            pad: std::array::from_fn(|a| c.pad[a].clone()),
+            quit_pad: c.pad[controls::QUIT].clone(),
             title: format!(
-                "MKDS | A={} B={} L={} R={} Start={} | mouse = touch | {} = quit",
+                "MKDS | A={} B={} L={} R={} Start={} | mouse = touch | F11 = fullscreen | {} = quit",
                 hint(0), hint(1), hint(9), hint(8), hint(3), hint(controls::QUIT)
             ),
         }
@@ -740,8 +707,8 @@ impl From<&Controls> for Bindings {
 }
 
 impl Bindings {
-    fn quit(&self, window: &Window) -> bool {
-        self.quit_keys.iter().any(|&k| window.is_key_down(k))
+    fn quit(&self, window: &HostLink, pads: &pad::Pads) -> bool {
+        window.any_down(&self.quit_keys) || window.focused() && pads.any_down(&self.quit_pad)
     }
 }
 
@@ -757,33 +724,20 @@ Fix it, or delete it to get the default controls back."))?;
     Ok(Bindings::from(&c))
 }
 
-fn input(window: &mut Window, bindings: &Bindings) -> (u16, Option<(u8, u8)>) {
-    let buttons = bindings.buttons.iter().enumerate().fold(0, |bits, (i, keys)| {
-        bits | if keys.iter().any(|&k| window.is_key_down(k)) { 1 << i } else { 0 }
+fn input(window: &HostLink, bindings: &Bindings, pads: &pad::Pads) -> (u16, Option<(u8, u8)>) {
+    if !window.focused() {
+        return (0, None); // an inactive window releases all guest input
+    }
+    let buttons = (0..12).fold(0, |bits, i| {
+        bits | if window.any_down(&bindings.buttons[i]) || pads.any_down(&bindings.pad[i]) { 1 << i } else { 0 }
     });
-    let touch = if window.get_mouse_down(MouseButton::Left) {
-        window.get_mouse_pos(MouseMode::Discard).and_then(|(x, y)| {
-            if (0.0..256.0).contains(&x) && (192.0..384.0).contains(&y) {
-                Some((x as u8, (y - 192.0) as u8))
-            } else {
-                None
-            }
-        })
-    } else {
-        None
-    };
-    let buttons = if window.is_active() { buttons } else { 0 };
     let buttons = DPAD.with(|d| {
         let mut state = d.get();
         let out = dpad_resolve(buttons, &mut state);
         d.set(state);
         out
     });
-    if window.is_active() {
-        (buttons, touch)
-    } else {
-        (0, None)
-    }
+    (buttons, window.touch())
 }
 
 fn capture(session: &mut Session<'_>, dir: &std::path::Path) -> Result<(), String> {
@@ -816,87 +770,22 @@ fn capture(session: &mut Session<'_>, dir: &std::path::Path) -> Result<(), Strin
 mod tests {
     use super::*;
     #[test]
-    fn key_table_matches_the_controls_file_names() {
-        for (key, name) in KEYS.iter().zip(controls::KEYS) {
-            assert_eq!(format!("{key:?}"), name);
-        }
-    }
-
-    #[test]
-    fn default_bindings_keep_the_documented_keys() {
+    fn default_bindings_read_the_documented_keys_through_the_window_link() {
+        let key = |n: &str| controls::key_index(n).unwrap();
         let b = Bindings::from(&Controls::default());
-        assert_eq!(b.buttons[0], [Key::Z]);
-        assert_eq!(b.buttons[9], [Key::A], "L (use item) is keyboard A");
-        assert_eq!(b.quit_keys, [Key::Escape]);
+        assert_eq!(b.buttons[9], [key("A")], "L (use item) is keyboard A");
+        let link = HostLink::for_tests();
+        let pads = pad::Pads::none();
+        link.set_for_tests(&[key("Z"), key("Left"), key("A")], Some((10, 20)), true);
+        assert_eq!(input(&link, &b, &pads), (1 | 32 | 1 << 9, Some((10, 20))));
+        assert!(!b.quit(&link, &pads));
+        link.set_for_tests(&[key("Z"), key("Escape")], Some((10, 20)), false);
+        assert_eq!(input(&link, &b, &pads), (0, None), "inactive window releases all guest input");
+        assert!(!b.quit(&link, &pads), "keys of an inactive window do not count");
+        link.set_for_tests(&[key("Escape")], None, true);
+        assert!(b.quit(&link, &pads));
     }
 
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "opens two short-lived native test windows; run explicitly on Windows"]
-    fn native_keyboard_focus_release_escape_and_window_close() {
-        use std::ffi::c_void;
-        #[link(name = "user32")]
-        unsafe extern "system" {
-            fn SendMessageW(
-                window: *mut c_void,
-                message: u32,
-                wparam: usize,
-                lparam: isize,
-            ) -> isize;
-            fn SetActiveWindow(window: *mut c_void) -> *mut c_void;
-        }
-        let mut first =
-            Window::new("Runtime input test", 64, 64, WindowOptions::default()).unwrap();
-        let second = Window::new("Runtime focus test", 64, 64, WindowOptions::default()).unwrap();
-        first.set_target_fps(0);
-        first.update();
-        let mut second = second;
-        second.update();
-        let handle = first.get_window_handle();
-        // Messages target only windows owned by this test, never other apps.
-        unsafe {
-            SetActiveWindow(handle);
-            SendMessageW(handle, 0x100, 0x5a, (0x2c << 16) | 1); // Z down
-            SendMessageW(handle, 0x100, 0x25, (0x14b << 16) | 1); // Left down
-        }
-        assert!(first.is_key_down(Key::Z));
-        assert!(first.is_key_down(Key::Left));
-        assert_eq!(input(&mut first, &Bindings::from(&Controls::default())).0, 1 | 32);
-        unsafe {
-            SendMessageW(handle, 0x201, 1, 0);
-        }
-        assert!(first.get_mouse_down(MouseButton::Left));
-        unsafe {
-            SetActiveWindow(second.get_window_handle());
-        }
-        assert_eq!(
-            input(&mut first, &Bindings::from(&Controls::default())),
-            (0, None),
-            "inactive window releases all guest input"
-        );
-        unsafe {
-            SetActiveWindow(handle);
-            SendMessageW(handle, 0x101, 0x5a, (0x2c << 16) | 1);
-            SendMessageW(handle, 0x101, 0x25, (0x14b << 16) | 1);
-            SendMessageW(handle, 0x202, 0, 0);
-        }
-        assert!(!first.get_mouse_down(MouseButton::Left));
-        assert_eq!(input(&mut first, &Bindings::from(&Controls::default())), (0, None));
-        unsafe {
-            SendMessageW(handle, 0x100, 0x1b, (1 << 16) | 1);
-        }
-        assert!(
-            first.is_key_down(Key::Escape),
-            "the host's quit key reaches the event loop"
-        );
-        unsafe {
-            SendMessageW(handle, 0x10, 0, 0);
-        }
-        assert!(
-            !first.is_open(),
-            "native close is observed without guest execution"
-        );
-    }
     #[test]
     fn headless_diagnostics_must_be_bounded_and_options_must_be_valid() {
         let parse = |s: &str| Options::from_args(s.split_whitespace().map(str::to_owned));
