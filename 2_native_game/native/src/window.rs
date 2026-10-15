@@ -120,7 +120,7 @@ impl HostLink {
 
 /// Runs the window on this (main) thread and `emulation` on a second thread until the emulation returns.
 /// How the window shows the screens (from `settings.txt` and the command line).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Display {
     /// GPU resolution as a multiple of 256x192; `None` = the sharpest that fits the window (up to 4x).
     pub scale: Option<u32>,
@@ -128,6 +128,10 @@ pub struct Display {
     pub smooth: bool,
     pub side_by_side: bool,
     pub fullscreen: bool,
+    /// Replacement textures (`<id>.png`) for the GPU renderer.
+    pub texture_pack: Option<std::path::PathBuf>,
+    /// Save every texture the game uses into this folder.
+    pub dump_textures: Option<std::path::PathBuf>,
 }
 
 /// Highest scale `Auto` picks: beyond 4x the GPU cost grows faster than the screens get sharper.
@@ -223,7 +227,7 @@ impl ApplicationHandler for App {
             .with_fullscreen(self.display.fullscreen.then_some(Fullscreen::Borderless(None)));
         let made = event_loop.create_window(attrs).map_err(|e| format!("Cannot open game window: {e}")).and_then(|w| {
             let w = Arc::new(w);
-            Presenter::new(Arc::clone(&w), self.display).map(|p| (w, p))
+            Presenter::new(Arc::clone(&w), self.display.clone()).map(|p| (w, p))
         });
         match made {
             Ok((w, p)) => {
@@ -591,7 +595,14 @@ impl Presenter {
         };
         if let Some(Frame::Gpu(f)) = &frame {
             if self.gpu_path.is_none() {
-                let renderer = Renderer3d::new(&self.gpu, self.scale);
+                let mut renderer = Renderer3d::new(&self.gpu, self.scale);
+                renderer.set_texture_dump(self.display.dump_textures.clone());
+                if let Some(pack) = &self.display.texture_pack {
+                    match renderer.set_texture_pack(Some(pack.clone())) {
+                        Ok(n) => eprintln!("Texture pack: {} ({n} replacements)", pack.display()),
+                        Err(e) => eprintln!("Texture pack not used: {e}"),
+                    }
+                }
                 let compositor = Compositor::new(&self.gpu, self.scale);
                 let bind = self.bind_texture(compositor.output(), self.config.format.is_srgb());
                 self.gpu_path = Some((renderer, compositor, bind));

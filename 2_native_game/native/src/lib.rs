@@ -346,6 +346,8 @@ fn run_internal(
         smooth: settings.smooth,
         side_by_side: settings.layout == Layout::SideBySide,
         fullscreen: settings.fullscreen,
+        texture_pack: settings.texture_pack.clone(),
+        dump_textures: settings.dump_textures.clone(),
     };
     // The window needs the main thread; the game runs on a second one and meets it through `HostLink`.
     window::run(&title, display, move |link| emulate(rom, image, table, signatures, table7, &options, Some(link), bindings))?
