@@ -122,7 +122,8 @@ impl HostLink {
 /// How the window shows the screens (from `settings.txt` and the command line).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Display {
-    /// GPU resolution as a multiple of 256x192; `None` = the sharpest that fits the window (up to 4x).
+    /// GPU resolution as a multiple of 256x192 (default 1, the original look); `None` = the sharpest that fits the
+    /// window (up to 4x).
     pub scale: Option<u32>,
     /// Linear filtering when stretching (`false` = sharp pixels).
     pub smooth: bool,

@@ -267,7 +267,7 @@ fn app(terminal: &mut DefaultTerminal, cfg: &mut Config, note: Option<(String, C
 /// The settings the menu can change, in order: (name, what it does).
 const DISPLAY_ROWS: [(&str, &str); 5] = [
     ("Renderer", "GPU: graphics card, sharp 3D. Software: CPU, like block 1"),
-    ("Scale", "3D sharpness (x the DS's 256x192); Auto fits the window"),
+    ("Scale", "3D sharpness: 1 = original, 2-8 = upscaled, Auto fits the window"),
     ("Filter", "how stretched screens look"),
     ("Layout", "where the bottom screen goes"),
     ("Fullscreen", "start in fullscreen (F11 switches while playing)"),
@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn display_settings_step_through_every_value_and_back() {
-        let mut s = Settings::default();
+        let mut s = Settings { scale: None, ..Settings::default() };
         let mut seen = Vec::new();
         for _ in 0..9 {
             seen.push(setting_value(&s, 1));

@@ -21,7 +21,8 @@ pub enum Layout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub renderer: Renderer,
-    /// Internal resolution as a multiple of 256x192 (1-8); `None` = the sharpest that fits the window.
+    /// Internal resolution as a multiple of 256x192 (1-8); `None` = the sharpest that fits the window. Default 1: the
+    /// original look.
     pub scale: Option<u32>,
     /// Linear filtering when the screens are stretched (`false` = sharp pixels).
     pub smooth: bool,
@@ -37,7 +38,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             renderer: Renderer::Gpu,
-            scale: None,
+            scale: Some(1),
             smooth: false,
             layout: Layout::Stacked,
             fullscreen: false,
@@ -107,15 +108,43 @@ impl Settings {
     pub fn to_text(&self) -> String {
         let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
         format!(
-            "# MKDS Native Builder display settings. Edit here or with mkds.bat -> \"Display settings\".\n\
-             # The game's command-line options (--renderer, --scale) override these for one run.\n\n\
-             Renderer = {}              # GPU or Software\n\
-             Scale = {}                 # 1-8 (x the DS's 256x192), or Auto: the sharpest that fits the window\n\
-             Filter = {}             # Sharp or Smooth, when the screens are stretched\n\
-             Layout = {}           # Stacked (top over bottom) or SideBySide\n\
-             Fullscreen = {}            # Yes or No (F11 switches while playing)\n\
-             TexturePack = {}            # folder of replacement textures (<id>.png); empty = none\n\
-             DumpTextures = {}           # folder to save the game's textures into; empty = off\n",
+            "# MKDS Native Builder display settings\n\
+             #\n\
+             # The defaults show the game the way the DS does: 256 x 192 per screen, sharp pixels, top screen above the\n\
+             # bottom one. Everything below only changes how the screens look, never how the game plays.\n\
+             # Change a value after the `=`, save, and start the game again. Or use mkds.bat -> \"Display settings\".\n\
+             # Delete this file to get the defaults back. For one run, `play.bat --scale 4` or\n\
+             # `play.bat --renderer software` override this file.\n\
+             \n\
+             # GPU (default): the graphics card draws the 3D and the screens; smooth 60 frames per second.\n\
+             # Software: the CPU draws everything, pixel for pixel like the console (can drop frames on slower PCs).\n\
+             Renderer = {}\n\
+             \n\
+             # 3D sharpness, as a multiple of the DS's 256 x 192 (GPU renderer only).\n\
+             #   1    = the original look (default).\n\
+             #   2-8  = upscaled 3D: 2 suits a 1080p monitor, 3-4 suit 1440p / 4K. Higher numbers need a faster graphics card.\n\
+             #   Auto = the sharpest that fits the window (up to 4), recalculated when you resize it.\n\
+             # The 2D parts (menus, map, HUD) always keep the DS's resolution.\n\
+             Scale = {}\n\
+             \n\
+             # How the screens look when the window is bigger than the DS: Sharp keeps crisp square pixels (default),\n\
+             # Smooth blurs them slightly, which some people prefer with Scale = 1.\n\
+             Filter = {}\n\
+             \n\
+             # Stacked: top screen above the bottom screen, like the console (default).\n\
+             # SideBySide: top screen on the left, touch screen on the right; better on wide monitors.\n\
+             Layout = {}\n\
+             \n\
+             # Yes: start in fullscreen. F11 switches between window and fullscreen at any time.\n\
+             Fullscreen = {}\n\
+             \n\
+             # Texture packs (GPU renderer): replace the game's textures with your own PNGs, e.g. hand-made or upscaled.\n\
+             # 1. Set DumpTextures to a folder and play: every texture the game shows is saved once as <id>.png.\n\
+             # 2. Edit or upscale the PNGs you want (whole-number size factors 1-8, same file names).\n\
+             # 3. Put them in a folder, set TexturePack to it, and empty DumpTextures again.\n\
+             # Dumped textures come from your copy of the game: do not share them.\n\
+             TexturePack = {}\n\
+             DumpTextures = {}\n",
             if self.renderer == Renderer::Gpu { "GPU" } else { "Software" },
             self.scale.map_or("Auto".to_string(), |s| s.to_string()),
             if self.smooth { "Smooth" } else { "Sharp" },
@@ -168,6 +197,8 @@ mod tests {
         assert_eq!(s.texture_pack, Some(PathBuf::from("C:\\packs\\hd")));
         assert_eq!(Settings::parse(&s.to_text()).unwrap(), s);
         assert_eq!(Settings::parse("Scale = auto").unwrap().scale, None);
+        assert_eq!(Settings::default().scale, Some(1), "the default is the DS's own resolution");
+        assert_eq!(Settings::parse("").unwrap(), Settings::default(), "an empty file means the defaults");
     }
 
     #[test]

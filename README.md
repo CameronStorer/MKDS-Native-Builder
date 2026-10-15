@@ -157,20 +157,25 @@ work for any controller: `South East North West` (face buttons; South is Xbox A 
 ## Display
 
 The 3D graphics and both screens are drawn by your **graphics card** (Direct3D 12 or Vulkan on Windows, Vulkan on Linux,
-Metal on macOS), at a higher resolution than the DS's 256 x 192 so the 3D looks sharp on modern monitors. The window can be
-resized and made fullscreen (F11).
+Metal on macOS). **By default the game looks like it does on a DS**: 256 x 192 per screen, sharp pixels, top screen above the
+bottom one, just shown bigger. The window can be resized and made fullscreen (F11).
+
+**Want sharper 3D?** Set `Scale = 2` (1080p monitors), `3` or `4` (1440p / 4K), or `Auto` in `settings.txt`, or start once
+with `play.bat --scale 3`. The 3D is then drawn at that multiple of the DS's resolution; menus, map and HUD stay as they are.
+The game plays exactly the same at every setting.
 
 Double-click `mkds.bat` and choose **Display settings**, or edit `settings.txt` (in the same folder as `controls.txt`):
 
 | Setting | Values | What it does |
 |---|---|---|
-| `Renderer` | `GPU` (default), `Software` | `Software` draws everything on the CPU, exactly like the first version |
-| `Scale` | `Auto` (default), `1`-`8` | 3D sharpness as a multiple of 256 x 192. `Auto` picks the sharpest that fits the window, up to 4x |
+| `Renderer` | `GPU` (default), `Software` | `Software` draws everything on the CPU, pixel for pixel like the console (can drop frames on slower PCs) |
+| `Scale` | `1` (default), `2`-`8`, `Auto` | 3D sharpness as a multiple of 256 x 192. `1` is the original look; `Auto` picks the sharpest that fits the window, up to 4x |
 | `Filter` | `Sharp` (default), `Smooth` | How the screens look when stretched to the window |
 | `Layout` | `Stacked` (default), `SideBySide` | Top screen above the bottom one, or next to it for wide monitors |
 | `Fullscreen` | `No` (default), `Yes` | Start in fullscreen |
 
-For one run, `play.bat --renderer software` or `play.bat --scale 4` override the file. Graphics cards without compute
+Every option is explained inside `settings.txt` itself. For one run, `play.bat --renderer software` or `play.bat --scale 4`
+override the file. Graphics cards without compute
 shaders (very old ones) automatically fall back to drawing on the CPU.
 
 ### Texture packs
