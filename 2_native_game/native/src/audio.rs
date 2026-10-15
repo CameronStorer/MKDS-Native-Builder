@@ -6,14 +6,14 @@ use std::{
 
 /// Source frames queued before playback (re)starts: absorbs host scheduling jitter so a brief
 /// stall does not turn into a stream of one-sample dropouts.
-const PRIME_FRAMES: usize = recomp::spu::SAMPLE_RATE as usize / 15; // ~66 ms
-/// Queue length above which the oldest audio is trimmed back to `TRIM_TO` (emulation outran the device).
-const MAX_FRAMES: usize = recomp::spu::SAMPLE_RATE as usize / 4; // 250 ms
-const TRIM_TO: usize = PRIME_FRAMES * 2;
+const PRIME_MS: usize = 66;
+const MAX_MS: usize = 250;
+const TRIM_MS: usize = 132;
 
-/// Jitter buffer plus linear-interpolating resampler from the SPU rate to the device rate.
+/// Jitter buffer with an exact passthrough at the device rate and a fallback linear resampler.
 /// Device-independent so its behaviour can be tested without an audio device.
 struct Queue {
+    rate: u32,
     frames: VecDeque<[i16; 2]>,
     /// Fractional position between `frames[0]` and `frames[1]`.
     pos: f64,
@@ -26,8 +26,9 @@ struct Queue {
 }
 
 impl Queue {
-    fn new() -> Self {
+    fn new(rate: u32) -> Self {
         Self {
+            rate,
             frames: VecDeque::new(),
             pos: 0.0,
             primed: false,
@@ -37,10 +38,14 @@ impl Queue {
         }
     }
 
+    fn frames_for_ms(&self, ms: usize) -> usize {
+        (self.rate as usize * ms / 1000).max(1)
+    }
+
     fn push(&mut self, samples: impl IntoIterator<Item = [i16; 2]>) {
         self.frames.extend(samples);
-        if self.frames.len() > MAX_FRAMES {
-            let excess = self.frames.len() - TRIM_TO;
+        if self.frames.len() > self.frames_for_ms(MAX_MS) {
+            let excess = self.frames.len() - self.frames_for_ms(TRIM_MS);
             self.frames.drain(..excess);
             self.dropped += excess as u64;
         }
@@ -59,12 +64,12 @@ impl Queue {
     /// One device frame. `step` is source frames consumed per device frame (source rate / device rate).
     fn next(&mut self, step: f64) -> [i16; 2] {
         if !self.primed {
-            if self.frames.len() < PRIME_FRAMES {
+            if self.frames.len() < self.frames_for_ms(PRIME_MS) {
                 return [0, 0];
             }
             self.primed = true;
         }
-        if self.frames.len() < 2 {
+        if self.frames.len() < if step == 1.0 { 1 } else { 2 } {
             // Ran dry: play silence until the queue refills to the prime level (one event, not a
             // stream of one-sample dropouts).
             self.primed = false;
@@ -72,6 +77,10 @@ impl Queue {
             self.pos = 0.0;
             self.frames.clear();
             return [0, 0];
+        }
+        if step == 1.0 {
+            self.pos = 0.0;
+            return self.frames.pop_front().unwrap();
         }
         let (a, b) = (self.frames[0], self.frames[1]);
         let t = self.pos as f32;
@@ -89,6 +98,7 @@ impl Queue {
 pub struct Output {
     shared: Arc<Mutex<Queue>>,
     _stream: cpal::Stream,
+    rate: u32,
 }
 
 impl Output {
@@ -101,7 +111,7 @@ impl Output {
             .map_err(|e| format!("Audio configuration failed: {e}"))?;
         let format = supported.sample_format();
         let config: cpal::StreamConfig = supported.into();
-        let shared = Arc::new(Mutex::new(Queue::new()));
+        let shared = Arc::new(Mutex::new(Queue::new(config.sample_rate)));
         let stream = match format {
             cpal::SampleFormat::F32 => stream::<f32>(&device, &config, shared.clone()),
             cpal::SampleFormat::I16 => stream::<i16>(&device, &config, shared.clone()),
@@ -119,7 +129,13 @@ impl Output {
         Ok(Self {
             shared,
             _stream: stream,
+            rate: config.sample_rate,
         })
+    }
+
+    /// Configure the machine to this rate before producing audio for this output.
+    pub fn rate(&self) -> u32 {
+        self.rate
     }
 
     pub fn push(&self, samples: Vec<[i16; 2]>) -> Result<(), String> {
@@ -127,6 +143,7 @@ impl Output {
         if let Some(error) = &q.error {
             return Err(format!("Audio output failed: {error}"));
         }
+        debug_assert_eq!(q.rate, self.rate());
         q.push(samples);
         Ok(())
     }
@@ -150,7 +167,7 @@ where
 {
     let errors = shared.clone();
     let channels = config.channels as usize;
-    let step = recomp::spu::SAMPLE_RATE as f64 / config.sample_rate as f64;
+    let step = 1.0; // The host configures the SPU to Output::rate().
     device.build_output_stream(
         config,
         move |data: &mut [T], _| {
@@ -186,12 +203,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn device_rate_passthrough_keeps_every_sample_and_buffer_durations() {
+        for rate in [32768, 44100, 48000, 96000] {
+            let mut q = Queue::new(rate);
+            let count = q.frames_for_ms(PRIME_MS);
+            assert_eq!(count, rate as usize * PRIME_MS / 1000);
+            let input: Vec<_> = (0..count).map(|i| [i as i16, !(i as i16)]).collect();
+            q.push(input.clone());
+            for sample in input { assert_eq!(q.next(1.0), sample); }
+            assert!(q.frames.is_empty());
+            assert_eq!(q.underruns, 0, "last queued sample must be played");
+            assert_eq!(q.next(1.0), [0, 0]);
+            assert_eq!(q.underruns, 1);
+            let max = q.frames_for_ms(MAX_MS);
+            q.push(std::iter::repeat_n([42, -42], max + 1));
+            assert_eq!(q.frames.len(), q.frames_for_ms(TRIM_MS));
+            assert_eq!(q.dropped as usize, max + 1 - q.frames_for_ms(TRIM_MS));
+            assert_eq!(q.next(1.0), [42, -42]);
+        }
+    }
+
+    #[test]
     fn recoverable_device_underrun_does_not_stop_playback() {
-        let mut q = Queue::new();
+        let mut q = Queue::new(recomp::spu::SAMPLE_RATE);
         q.stream_error(cpal::StreamError::BufferUnderrun);
         assert!(q.error.is_none());
         assert_eq!(q.underruns, 1);
-        q.push(std::iter::repeat_n([123, -123], PRIME_FRAMES));
+        q.push(std::iter::repeat_n([123, -123], q.frames_for_ms(PRIME_MS)));
         assert_eq!(q.next(1.0), [123, -123]);
         q.stream_error(cpal::StreamError::DeviceNotAvailable);
         let fatal = q.error.clone();
@@ -222,7 +260,7 @@ mod tests {
     #[test]
     fn resampling_keeps_pitch_at_the_device_rate() {
         for device_rate in [44_100.0, 48_000.0] {
-            let mut q = Queue::new();
+            let mut q = Queue::new(recomp::spu::SAMPLE_RATE);
             q.push(sine(recomp::spu::SAMPLE_RATE as usize / 5, 1000.0));
             let step = recomp::spu::SAMPLE_RATE as f64 / device_rate;
             let out: Vec<_> = (0..(device_rate as usize / 8)).map(|_| q.next(step)).collect();
@@ -234,8 +272,8 @@ mod tests {
 
     #[test]
     fn waits_for_a_prime_before_playing_and_does_not_count_it_as_an_underrun() {
-        let mut q = Queue::new();
-        q.push(sine(PRIME_FRAMES - 1, 440.0));
+        let mut q = Queue::new(recomp::spu::SAMPLE_RATE);
+        q.push(sine(q.frames_for_ms(PRIME_MS) - 1, 440.0));
         assert!((0..100).all(|_| q.next(0.7) == [0, 0]));
         assert_eq!(q.underruns, 0);
         q.push(sine(10, 440.0));
@@ -244,23 +282,23 @@ mod tests {
 
     #[test]
     fn running_dry_counts_once_then_reprimes() {
-        let mut q = Queue::new();
-        q.push(sine(PRIME_FRAMES, 440.0));
+        let mut q = Queue::new(recomp::spu::SAMPLE_RATE);
+        q.push(sine(q.frames_for_ms(PRIME_MS), 440.0));
         let mut dry = 0;
-        for _ in 0..(PRIME_FRAMES * 3) {
+        for _ in 0..(q.frames_for_ms(PRIME_MS) * 3) {
             q.next(1.0);
             dry = q.underruns;
         }
         assert_eq!(dry, 1, "one dropout event, not one per device frame");
-        q.push(sine(PRIME_FRAMES, 440.0));
+        q.push(sine(q.frames_for_ms(PRIME_MS), 440.0));
         assert!((0..50).any(|_| q.next(1.0) != [0, 0]), "playback resumes after refill");
     }
 
     #[test]
     fn overflow_discards_the_oldest_audio_in_one_trim() {
-        let mut q = Queue::new();
-        q.push(sine(MAX_FRAMES + 500, 440.0));
-        assert_eq!(q.frames.len(), TRIM_TO);
-        assert_eq!(q.dropped as usize, MAX_FRAMES + 500 - TRIM_TO);
+        let mut q = Queue::new(recomp::spu::SAMPLE_RATE);
+        q.push(sine(q.frames_for_ms(MAX_MS) + 500, 440.0));
+        assert_eq!(q.frames.len(), q.frames_for_ms(TRIM_MS));
+        assert_eq!(q.dropped as usize, q.frames_for_ms(MAX_MS) + 500 - q.frames_for_ms(TRIM_MS));
     }
 }

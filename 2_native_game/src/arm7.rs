@@ -31,7 +31,7 @@ const CODE_LO: u32 = 0x037F_8000;
 const CODE_HI: u32 = 0x0381_0000;
 
 pub struct State7 {
-    /// Sound output rendered as emulated time passes (stereo, `spu::SAMPLE_RATE`), for the platform's
+    /// Sound output rendered as emulated time passes (stereo, at the SPU output rate), for the platform's
     /// audio device to drain; bounded (old samples are dropped when nobody listens).
     pub audio_out: std::collections::VecDeque<[i16; 2]>,
     /// Fractional output frames, in units of ARM7 clock ticks.
@@ -174,7 +174,7 @@ impl Arm7 {
 
     /// Runs about `cycles` ARM7 cycles (one instruction counted as one cycle; halted time passes
     /// at once), delivering interrupts from the shared hardware. Call it as the ARM9 side's time advances.
-    /// Renders `frames` stereo samples (32,768 Hz) of what the sound channels are playing, reading sample
+    /// Renders `frames` stereo samples at the SPU output rate of what the sound channels are playing, reading sample
     /// data from memory as the hardware would.
     pub fn render_audio(&mut self, hw: &mut ds_mem::Bus, frames: usize) -> Vec<[i16; 2]> {
         let mut spu = std::mem::take(&mut self.s.spu);
@@ -190,14 +190,14 @@ impl Arm7 {
         self.run_cpu(hw, cycles);
         // the sound hardware runs with time whether or not anyone listens: one-shot channels must end
         // (the game waits for that) even in a headless run
-        const ARM7_HZ: u64 = 33_513_982;
-        self.s.audio_cycles += cycles as u64 * crate::spu::SAMPLE_RATE as u64;
+        const ARM7_HZ: u64 = ds_mem::BUS_HZ;
+        self.s.audio_cycles += cycles as u64 * self.s.spu.output_rate() as u64;
         let frames = self.s.audio_cycles / ARM7_HZ;
         self.s.audio_cycles %= ARM7_HZ;
         if frames > 0 {
             let out = self.render_audio(hw, frames as usize);
             self.s.audio_out.extend(out);
-            let cap = crate::spu::SAMPLE_RATE as usize; // one second
+            let cap = self.s.spu.output_rate() as usize; // one second
             if self.s.audio_out.len() > cap {
                 let drop = self.s.audio_out.len() - cap;
                 self.s.audio_out.drain(..drop);
@@ -811,6 +811,24 @@ mod tests {
     static TEST_LIFT: &[crate::mem::Lifted] = &[crate::mem::Lifted {
         segment: "bios7", entry: 0x18, blocks: &[0x18, 0x03800000], insts: &[0x18, 0x03800000], f: test_lift,
     }];
+
+    #[test]
+    fn audio_pacing_uses_output_rate_and_caps_one_second() {
+        for rate in [crate::spu::SAMPLE_RATE, 48000] {
+            let mut a = super::Arm7::new();
+            let mut hw = crate::ds_mem::Bus::new();
+            a.s.halted = true;
+            a.s.spu.set_output_rate(rate);
+            let mut cycles = 0u64;
+            for chunk in [1, 511, 65536, 123456, 1000000] {
+                a.run(&mut hw, chunk);
+                cycles += chunk as u64;
+                assert_eq!(a.s.audio_out.len() as u64, cycles * rate as u64 / crate::ds_mem::BUS_HZ);
+            }
+            a.run(&mut hw, crate::ds_mem::BUS_HZ as u32);
+            assert_eq!(a.s.audio_out.len(), rate as usize);
+        }
+    }
 
     #[test]
     fn lifted_arm7_halts_and_accounts_cycles_without_interpreting() {
