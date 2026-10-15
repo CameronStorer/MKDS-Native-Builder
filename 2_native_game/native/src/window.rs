@@ -1,7 +1,8 @@
 //! Native window (block 2 stage B2.1): a `winit` window presented with `wgpu` on the main thread. The emulation runs on
 //! its own thread and talks to the window only through [`HostLink`]: it reads the input state and hands over finished
 //! frames; the window owns the event loop, scaling, fullscreen and the mouse-to-touch-screen mapping.
-use crate::gpu::Gpu;
+use crate::gpu::{Compositor, Gpu, Renderer3d};
+use recomp::{gfx2d::Split, machine::RenderSnapshot};
 use mkds_builder::controls;
 use std::collections::HashMap;
 use std::sync::{
@@ -19,6 +20,21 @@ use winit::window::{Fullscreen, Window, WindowId};
 pub const W: u32 = 256;
 pub const H: u32 = 384;
 
+/// A frame for the window.
+pub enum Frame {
+    /// Finished screens from the software renderer: 256 x 384, `0x00RRGGBB`.
+    Pixels(Vec<u32>),
+    /// The renderer input plus both engines' 2D work; the window draws the 3D layer and the screens on the GPU.
+    Gpu(Box<GpuFrame>),
+}
+
+pub struct GpuFrame {
+    pub snap: RenderSnapshot,
+    pub a: Split,
+    pub b: Split,
+    pub a_top: bool,
+}
+
 #[derive(Default)]
 struct InputState {
     /// Held keys as `controls::KEYS` indexes, by the physical key that pressed them (so a release always matches).
@@ -30,7 +46,7 @@ struct InputState {
 /// What the emulation thread and the window share.
 pub struct HostLink {
     input: Mutex<InputState>,
-    frame: Mutex<Option<Vec<u32>>>,
+    frame: Mutex<Option<Frame>>,
     closed: AtomicBool,
     finished: AtomicBool,
     proxy: Mutex<Option<EventLoopProxy<()>>>,
@@ -68,9 +84,9 @@ impl HostLink {
         s.touch.filter(|_| s.focused)
     }
 
-    /// Shows `pixels` (256 x 384, `0x00RRGGBB`) at the next redraw; a newer frame replaces one not yet shown.
-    pub fn present(&self, pixels: Vec<u32>) {
-        *self.frame.lock().unwrap() = Some(pixels);
+    /// Shows `frame` at the next redraw; a newer frame replaces one not yet shown.
+    pub fn present(&self, frame: Frame) {
+        *self.frame.lock().unwrap() = Some(frame);
         self.wake();
     }
 
@@ -103,7 +119,8 @@ impl HostLink {
 }
 
 /// Runs the window on this (main) thread and `emulation` on a second thread until the emulation returns.
-pub fn run<T: Send>(title: &str, emulation: impl FnOnce(Arc<HostLink>) -> T + Send) -> Result<T, String> {
+/// `scale`: the GPU renderer's resolution as a multiple of 256x192.
+pub fn run<T: Send>(title: &str, scale: u32, emulation: impl FnOnce(Arc<HostLink>) -> T + Send) -> Result<T, String> {
     let event_loop = EventLoop::<()>::with_user_event().build().map_err(|e| format!("Cannot start the window system: {e}"))?;
     let link = HostLink::new();
     *link.proxy.lock().unwrap() = Some(event_loop.create_proxy());
@@ -123,8 +140,32 @@ pub fn run<T: Send>(title: &str, emulation: impl FnOnce(Arc<HostLink>) -> T + Se
                 emulation(Arc::clone(&done.0))
             })
             .map_err(|e| format!("Cannot start the emulation thread: {e}"))?;
-        let mut app = App { link: Arc::clone(&link), title: title.to_owned(), window: None, gfx: None, error: None, cursor: None, mouse_down: false };
-        let ran = event_loop.run_app(&mut app);
+        let mut app = App { link: Arc::clone(&link), title: title.to_owned(), scale, window: None, gfx: None, error: None, cursor: None, mouse_down: false };
+        // A panic in the window must still stop the game thread (the scope waits for it) before it is reported.
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| event_loop.run_app(&mut app)));
+        link.closed.store(true, Ordering::Release);
+        let ran = match ran {
+            Ok(r) => r,
+            Err(panic) => {
+                let _ = worker.join();
+                std::panic::resume_unwind(panic);
+            }
+        };
+        // Diagnostics: `MKDS_SCREENSHOT=file.ppm` saves the last GPU screens (game graphics: keep it local).
+        if let (Some(path), Some(g)) = (std::env::var_os("MKDS_SCREENSHOT"), &app.gfx) {
+            if let Some((_, compositor, _)) = &g.gpu_path {
+                let out = compositor.output();
+                let (w, h) = (out.width(), out.height());
+                let mut ppm = format!("P6
+{w} {h}
+255
+").into_bytes();
+                for p in g.gpu.read_rgba(out) {
+                    ppm.extend_from_slice(&[(p >> 24) as u8, (p >> 16) as u8, (p >> 8) as u8]);
+                }
+                let _ = std::fs::write(path, ppm);
+            }
+        }
         link.closed.store(true, Ordering::Release); // the window is gone, whatever happened
         let result = worker.join().map_err(|_| "The emulation thread panicked".to_string());
         ran.map_err(|e| format!("Window system error: {e}"))?;
@@ -138,6 +179,7 @@ pub fn run<T: Send>(title: &str, emulation: impl FnOnce(Arc<HostLink>) -> T + Se
 struct App {
     link: Arc<HostLink>,
     title: String,
+    scale: u32,
     window: Option<Arc<Window>>,
     gfx: Option<Presenter>,
     error: Option<String>,
@@ -166,7 +208,7 @@ impl ApplicationHandler for App {
             .with_min_inner_size(LogicalSize::new(W / 2, H / 2));
         let made = event_loop.create_window(attrs).map_err(|e| format!("Cannot open game window: {e}")).and_then(|w| {
             let w = Arc::new(w);
-            Presenter::new(Arc::clone(&w)).map(|p| (w, p))
+            Presenter::new(Arc::clone(&w), self.scale).map(|p| (w, p))
         });
         match made {
             Ok((w, p)) => {
@@ -242,7 +284,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let frame = self.link.frame.lock().unwrap().take();
                 if let Some(g) = &mut self.gfx {
-                    if let Err(e) = g.draw(frame.as_deref()) {
+                    if let Err(e) = g.draw(frame) {
                         self.error = Some(e);
                         self.link.closed.store(true, Ordering::Release);
                         event_loop.exit();
@@ -352,13 +394,19 @@ struct Presenter {
     config: wgpu::SurfaceConfiguration,
     screens: wgpu::Texture,
     bind: wgpu::BindGroup,
+    bind_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
     layout: Layout,
     rgba: Vec<u8>,
+    /// The GPU renderer, created with the first GPU frame, and the bind group showing its output.
+    gpu_path: Option<(Renderer3d, Compositor, wgpu::BindGroup)>,
+    scale: u32,
+    showing_gpu: bool,
 }
 
 impl Presenter {
-    fn new(window: Arc<Window>) -> Result<Presenter, String> {
+    fn new(window: Arc<Window>, scale: u32) -> Result<Presenter, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance.create_surface(Arc::clone(&window)).map_err(|e| format!("Cannot draw into the window: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -445,7 +493,10 @@ impl Presenter {
             cache: None,
         });
         let layout = Layout::fit(config.width, config.height);
-        Ok(Presenter { window, gpu, surface, config, screens, bind, pipeline, layout, rgba: vec![0; (W * H * 4) as usize] })
+        Ok(Presenter {
+            window, gpu, surface, config, screens, bind, bind_layout, sampler, pipeline, layout,
+            rgba: vec![0; (W * H * 4) as usize], gpu_path: None, scale, showing_gpu: false,
+        })
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -458,8 +509,37 @@ impl Presenter {
         self.layout = Layout::fit(size.width, size.height);
     }
 
-    fn draw(&mut self, frame: Option<&[u32]>) -> Result<(), String> {
-        if let Some(pixels) = frame {
+    fn bind_texture(&self, texture: &wgpu::Texture, srgb_view: bool) -> wgpu::BindGroup {
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: srgb_view.then_some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING), // sRGB views cannot be storage
+            ..Default::default()
+        });
+        self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("present"),
+            layout: &self.bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        })
+    }
+
+    fn draw(&mut self, frame: Option<Frame>) -> Result<(), String> {
+        if let Some(Frame::Gpu(f)) = &frame {
+            if self.gpu_path.is_none() {
+                let renderer = Renderer3d::new(&self.gpu, self.scale);
+                let compositor = Compositor::new(&self.gpu, self.scale);
+                let bind = self.bind_texture(compositor.output(), self.config.format.is_srgb());
+                self.gpu_path = Some((renderer, compositor, bind));
+            }
+            let (renderer, compositor, _) = self.gpu_path.as_mut().unwrap();
+            let layer = renderer.render(&self.gpu, &f.snap);
+            compositor.render(&self.gpu, &f.a, &f.b, f.a_top, layer);
+            self.showing_gpu = true;
+        }
+        if let Some(Frame::Pixels(pixels)) = &frame {
+            self.showing_gpu = false;
             for (out, p) in self.rgba.chunks_exact_mut(4).zip(pixels) {
                 out.copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, 255]);
             }
@@ -497,7 +577,11 @@ impl Presenter {
             if l.w >= 1.0 && l.h >= 1.0 {
                 pass.set_viewport(l.x as f32, l.y as f32, l.w as f32, l.h as f32, 0.0, 1.0);
                 pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind, &[]);
+                let bind = match (&self.gpu_path, self.showing_gpu) {
+                    (Some((_, _, gpu_bind)), true) => gpu_bind,
+                    _ => &self.bind,
+                };
+                pass.set_bind_group(0, bind, &[]);
                 pass.draw(0..3, 0..1);
             }
         }

@@ -677,6 +677,15 @@ impl RenderSnapshot {
         (a, b, u16::from_le_bytes([self.io[0x304], self.io[0x305]]) & 0x8000 != 0)
     }
 
+    /// [`RenderSnapshot::splits`] with the two engines on two threads.
+    pub fn splits_parallel(&self) -> (crate::gfx2d::Split, crate::gfx2d::Split, bool) {
+        std::thread::scope(|s| {
+            let a = s.spawn(|| crate::gfx2d::split_memory(&self.io, &self.palette, &self.oam, &self.vram, 0));
+            let b = crate::gfx2d::split_memory(&self.io, &self.palette, &self.oam, &self.vram, 1);
+            (a.join().expect("engine A split"), b, u16::from_le_bytes([self.io[0x304], self.io[0x305]]) & 0x8000 != 0)
+        })
+    }
+
     /// The software 3D layer alone (packed `0xRRGGBBAA`, alpha 0 = no 3D pixel): the GPU renderer's reference.
     pub fn layer3d(&self) -> Vec<u32> {
         render_3d(&self.io, &self.vram, &self.polys, self.viewport)

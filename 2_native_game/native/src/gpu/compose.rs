@@ -70,7 +70,8 @@ impl Compositor {
             dimension: wgpu::TextureDimension::D2,
             format: Self::FORMAT,
             usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
+            // The window samples it through an sRGB view when the window itself is sRGB (colours pass unchanged).
+            view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
         });
         Compositor {
             scale,
@@ -91,6 +92,11 @@ impl Compositor {
 
     pub fn scale(&self) -> u32 {
         self.scale
+    }
+
+    /// The output texture (both screens, top first), also between frames.
+    pub fn output(&self) -> &wgpu::Texture {
+        &self.output
     }
 
     /// Both screens (top first) at the compositor's scale. `layer3d` must be 256*scale x 192*scale `Rgba8Unorm`.

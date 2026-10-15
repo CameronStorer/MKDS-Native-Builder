@@ -40,6 +40,10 @@ pub struct Options {
     pub input_log: Option<PathBuf>,
     /// Keyboard controls file (default: the user's `controls.txt`, see `mkds_builder::controls`).
     pub controls: Option<PathBuf>,
+    /// `--renderer software`: the block 1 CPU renderer instead of the GPU (also the GPU's reference).
+    pub software_renderer: bool,
+    /// `--scale N`: 3D and screen resolution as a multiple of the DS's 256x192 (GPU renderer, 1-8).
+    pub scale: Option<u32>,
 }
 
 impl Options {
@@ -52,6 +56,18 @@ impl Options {
                 "--mute" => result.mute = true,
                 "--stats" => result.stats = true,
                 "--diagnostic-arm7-interpreter" => result.diagnostic_arm7_interpreter = true,
+                "--renderer" => match args.next().as_deref() {
+                    Some("gpu") => result.software_renderer = false,
+                    Some("software") => result.software_renderer = true,
+                    _ => return Err("--renderer needs gpu or software".into()),
+                },
+                "--scale" => {
+                    let n = positive(args.next(), "--scale")?;
+                    if n > 8 {
+                        return Err("--scale must be 1-8".into());
+                    }
+                    result.scale = Some(n as u32);
+                }
                 "--controls" => {
                     result.controls = Some(args.next().ok_or("--controls needs a file path")?.into())
                 }
@@ -191,19 +207,36 @@ fn avg_ms(total: Duration, n: u64) -> f64 {
 }
 
 // The core owns all rendering; the host only transports snapshots and presents pixels.
-use recomp::machine::{RenderSnapshot, RenderedScreens};
+use recomp::machine::RenderSnapshot;
+
+/// A finished render job: the frame for the window and its CPU cost (total; 3D, 2D-A, 2D-B).
+struct Done {
+    frame: window::Frame,
+    took: Duration,
+    parts: [Duration; 3],
+}
 
 /// Spawns the render worker. `busy` is set by the caller when it submits a job and cleared here
 /// when the frame is done, so at most one frame is ever in flight (a busy worker means "skip").
 fn spawn_renderer(
     busy: Arc<AtomicBool>,
-) -> (mpsc::Sender<RenderSnapshot>, mpsc::Receiver<RenderedScreens>) {
+    gpu: bool,
+) -> (mpsc::Sender<RenderSnapshot>, mpsc::Receiver<Done>) {
     let (job_tx, job_rx) = mpsc::channel::<RenderSnapshot>();
     let (done_tx, done_rx) = mpsc::channel();
     std::thread::spawn(move || {
         for job in job_rx {
-            let done = job.screens_profiled();
-            drop(job);
+            let done = if gpu {
+                // The 2D engines' CPU part; the 3D layer and the final screens are drawn by the window's GPU.
+                let started = Instant::now();
+                let (a, b, a_top) = job.splits_parallel();
+                let took = started.elapsed();
+                Done { frame: window::Frame::Gpu(Box::new(window::GpuFrame { snap: job, a, b, a_top })), took, parts: [Duration::ZERO, took, Duration::ZERO] }
+            } else {
+                let done = job.screens_profiled();
+                drop(job);
+                Done { frame: window::Frame::Pixels(done.pixels), took: done.took, parts: done.parts }
+            };
             let _ = done_tx.send(done);
             busy.store(false, Ordering::Release);
         }
@@ -305,7 +338,8 @@ fn run_internal(
     let bindings = load_bindings(&options)?;
     let title = bindings.title.clone();
     // The window needs the main thread; the game runs on a second one and meets it through `HostLink`.
-    window::run(&title, move |link| emulate(rom, image, table, signatures, table7, &options, Some(link), bindings))?
+    let scale = options.scale.unwrap_or(2);
+    window::run(&title, scale, move |link| emulate(rom, image, table, signatures, table7, &options, Some(link), bindings))?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -404,7 +438,7 @@ fn emulate(
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     }
     let busy = Arc::new(AtomicBool::new(false));
-    let renderer = window.is_some().then(|| spawn_renderer(busy.clone()));
+    let renderer = window.is_some().then(|| spawn_renderer(busy.clone(), !options.software_renderer));
     // Wall-clock time spent re-anchoring the schedule after a slow stretch (no catch-up sprint).
     let mut skew = Duration::ZERO;
     let mut parity: Option<Vec<u32>> = None;
@@ -526,14 +560,14 @@ fn emulate(
                             for (total, part) in stats.parts.iter_mut().zip(done.parts) {
                                 *total += part;
                             }
-                            if let Some(expected) = parity.take() {
-                                if expected != done.pixels {
+                            if let (Some(expected), window::Frame::Pixels(pixels)) = (parity.take(), &done.frame) {
+                                if &expected != pixels {
                                     eprintln!("[stats] RENDER PARITY MISMATCH: worker frame differs from Session::screens()");
                                 } else {
                                     stats.parity_ok += 1;
                                 }
                             }
-                            w.present(done.pixels);
+                            w.present(done.frame);
                             stats.presented += 1;
                         }
                     }
@@ -547,7 +581,7 @@ fn emulate(
                             let snap_started = Instant::now();
                             let job = session.render_snapshot();
                             stats.snapshot_time += snap_started.elapsed();
-                            if options.stats && jobs % 120 == 0 {
+                            if options.stats && options.software_renderer && jobs % 120 == 0 {
                                 parity = Some(session.screens());
                             }
                             jobs += 1;
