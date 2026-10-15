@@ -670,6 +670,13 @@ impl RenderSnapshot {
         Ok(s)
     }
 
+    /// Both engines with the 3D layer left open (engine A, engine B) and whether engine A is on the top screen.
+    pub fn splits(&self) -> (crate::gfx2d::Split, crate::gfx2d::Split, bool) {
+        let a = crate::gfx2d::split_memory(&self.io, &self.palette, &self.oam, &self.vram, 0);
+        let b = crate::gfx2d::split_memory(&self.io, &self.palette, &self.oam, &self.vram, 1);
+        (a, b, u16::from_le_bytes([self.io[0x304], self.io[0x305]]) & 0x8000 != 0)
+    }
+
     /// The software 3D layer alone (packed `0xRRGGBBAA`, alpha 0 = no 3D pixel): the GPU renderer's reference.
     pub fn layer3d(&self) -> Vec<u32> {
         render_3d(&self.io, &self.vram, &self.polys, self.viewport)

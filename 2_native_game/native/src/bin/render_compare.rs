@@ -5,6 +5,8 @@
 //!   --floor  required share for every single frame (default 97)
 //!   --images write `<name>_soft.ppm`, `<name>_gpu.ppm`, `<name>_diff.ppm` for frames below --min
 //!   --self-test compare software against software (checks the tool; must be 100%)
+//!   --split-check  check that both screens rebuilt from `render_split` + the software 3D layer equal the
+//!                  software screens exactly (the CPU form of the GPU compositor)
 //!   --dump   write every snapshot's software screens as `<name>_screens.ppm` into the --images folder
 use mkds_native::gpu::{Diff, Gpu, Renderer3d, Rgba};
 use recomp::machine::RenderSnapshot;
@@ -28,7 +30,7 @@ fn ppm(pixels: &[Rgba], w: usize, h: usize) -> Vec<u8> {
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().ok_or("usage: render_compare <snapshot-dir> [--min PCT] [--floor PCT] [--images DIR] [--self-test]")?);
-    let (mut min, mut floor, mut images, mut self_test, mut dump) = (99.0f64, 97.0f64, None::<PathBuf>, false, false);
+    let (mut min, mut floor, mut images, mut self_test, mut dump, mut split_check) = (99.0f64, 97.0f64, None::<PathBuf>, false, false, false);
     while let Some(a) = args.next() {
         let mut num = |name: &str| args.next().and_then(|v| v.parse::<f64>().ok()).ok_or(format!("{name} needs a number"));
         match a.as_str() {
@@ -37,6 +39,7 @@ fn run() -> Result<(), String> {
             "--images" => images = Some(args.next().ok_or("--images needs a folder")?.into()),
             "--self-test" => self_test = true,
             "--dump" => dump = true,
+            "--split-check" => split_check = true,
             _ => return Err(format!("unknown option {a}")),
         }
     }
@@ -65,6 +68,24 @@ fn run() -> Result<(), String> {
         if let (Some(out), true) = (&images, dump) {
             std::fs::write(out.join(format!("{name}_screens.ppm")), ppm(&snap.screens().iter().map(|p| p << 8 | 255).collect::<Vec<_>>(), 256, 384))
                 .map_err(|e| e.to_string())?;
+        }
+        if split_check {
+            let layer = snap.layer3d();
+            let (a, b, a_top) = snap.splits();
+            let (a, b) = (a.compose(Some(&layer)), b.compose(None));
+            let (top, bottom) = if a_top { (a, b) } else { (b, a) };
+            let rebuilt: Vec<Rgba> = top.into_iter().chain(bottom).map(|p| p >> 8).collect();
+            let soft = snap.screens();
+            let d = Diff::of(&soft, &rebuilt);
+            if d.identical != d.pixels {
+                failed += 1;
+                println!("{name}  split differs: {} pixels, max channel {}", d.pixels - d.identical, d.max_channel);
+            }
+            sum += d.percent();
+            if d.percent() < worst.0 {
+                worst = (d.percent(), name.clone());
+            }
+            continue;
         }
         let soft = snap.layer3d();
         let other = match (&gpu, renderer.as_mut()) {
