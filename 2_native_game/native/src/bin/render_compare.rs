@@ -7,8 +7,10 @@
 //!   --self-test compare software against software (checks the tool; must be 100%)
 //!   --split-check  check that both screens rebuilt from `render_split` + the software 3D layer equal the
 //!                  software screens exactly (the CPU form of the GPU compositor)
+//!   --composite    full screens through the GPU compositor: with the software 3D layer (must be exact) and
+//!                  with the GPU 3D layer (gated by --min/--floor)
 //!   --dump   write every snapshot's software screens as `<name>_screens.ppm` into the --images folder
-use mkds_native::gpu::{Diff, Gpu, Renderer3d, Rgba};
+use mkds_native::gpu::{compose, Compositor, Diff, Gpu, Renderer3d, Rgba};
 use recomp::machine::RenderSnapshot;
 use std::path::PathBuf;
 
@@ -30,7 +32,7 @@ fn ppm(pixels: &[Rgba], w: usize, h: usize) -> Vec<u8> {
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().ok_or("usage: render_compare <snapshot-dir> [--min PCT] [--floor PCT] [--images DIR] [--self-test]")?);
-    let (mut min, mut floor, mut images, mut self_test, mut dump, mut split_check) = (99.0f64, 97.0f64, None::<PathBuf>, false, false, false);
+    let (mut min, mut floor, mut images, mut self_test, mut dump, mut split_check, mut composite) = (99.0f64, 97.0f64, None::<PathBuf>, false, false, false, false);
     while let Some(a) = args.next() {
         let mut num = |name: &str| args.next().and_then(|v| v.parse::<f64>().ok()).ok_or(format!("{name} needs a number"));
         match a.as_str() {
@@ -40,6 +42,7 @@ fn run() -> Result<(), String> {
             "--self-test" => self_test = true,
             "--dump" => dump = true,
             "--split-check" => split_check = true,
+            "--composite" => composite = true,
             _ => return Err(format!("unknown option {a}")),
         }
     }
@@ -57,6 +60,8 @@ fn run() -> Result<(), String> {
     }
     let gpu = if self_test { None } else { Some(Gpu::headless()?) };
     let mut renderer = gpu.as_ref().map(|g| Renderer3d::new(g, 1));
+    let mut compositor = gpu.as_ref().map(|g| Compositor::new(g, 1));
+    let mut exact_failures = 0usize;
     if let Some(g) = &gpu {
         let info = g.adapter.get_info();
         println!("GPU: {} ({:?})", info.name, info.backend);
@@ -87,6 +92,34 @@ fn run() -> Result<(), String> {
             }
             continue;
         }
+        if let (true, Some(g), Some(r), Some(c)) = (composite, &gpu, renderer.as_mut(), compositor.as_mut()) {
+            let soft: Vec<Rgba> = snap.screens().iter().map(|p| p << 8 | 255).collect();
+            let (a, b, a_top) = snap.splits();
+            let soft3d = compose::upload_layer(g, &snap.layer3d());
+            let exact = g.read_rgba(c.render(g, &a, &b, a_top, &soft3d));
+            let e = Diff::of(&soft, &exact);
+            if e.identical != e.pixels {
+                exact_failures += 1;
+                println!("{name}  compositor with the software 3D layer differs: {} pixels", e.pixels - e.identical);
+            }
+            let layer = r.render(g, &snap);
+            let other = g.read_rgba(c.render(g, &a, &b, a_top, layer));
+            let d = Diff::of(&soft, &other);
+            let pct = d.percent();
+            sum += pct;
+            if pct < worst.0 {
+                worst = (pct, name.clone());
+            }
+            let bad = pct < floor;
+            failed += bad as usize;
+            println!("{name}  screens identical {pct:7.3}%  max channel diff {:3}{}", d.max_channel, if bad { "  BELOW FLOOR" } else { "" });
+            if let (Some(out), true) = (&images, pct < min) {
+                for (suffix, px) in [("soft_screens", &soft), ("gpu_screens", &other)] {
+                    std::fs::write(out.join(format!("{name}_{suffix}.ppm")), ppm(px, 256, 384)).map_err(|e| e.to_string())?;
+                }
+            }
+            continue;
+        }
         let soft = snap.layer3d();
         let other = match (&gpu, renderer.as_mut()) {
             (Some(g), Some(r)) => {
@@ -113,7 +146,10 @@ fn run() -> Result<(), String> {
     }
     let avg = sum / files.len() as f64;
     println!("{} frames: average {avg:.3}% identical, worst {:.3}% ({}), {failed} below the {floor}% floor", files.len(), worst.0, worst.1);
-    if avg < min || failed > 0 {
+    if composite {
+        println!("compositor with the software 3D layer: {} of {} frames exact", files.len() - exact_failures, files.len());
+    }
+    if avg < min || failed > 0 || exact_failures > 0 {
         return Err(format!("FAILED: needs average >= {min}% and every frame >= {floor}%"));
     }
     println!("PASSED");
