@@ -400,6 +400,11 @@ fn emulate(
     } else {
         Some(audio::Output::new()?)
     };
+    if let Some(sound) = &sound {
+        // The sound unit mixes straight at the device's rate: no second resampling on the way out.
+        session.machine.set_audio_rate(sound.rate());
+        eprintln!("Audio: {} Hz", sound.rate());
+    }
     let start = Instant::now();
     let idle_error = Rc::new(RefCell::new(None::<String>));
     if let Some(path) = &options.input_log {
