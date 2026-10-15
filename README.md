@@ -35,6 +35,9 @@ file; the builder reads it on your machine, translates the game's machine code i
 
 That's it.
 
+**Or use the menu:** double-click **`mkds.bat`**. It lets you build the game (drag your `.nds` file into the window when it
+asks), play it, and change the controls, all from one place.
+
 ---
 
 ## Controls
@@ -51,6 +54,25 @@ That's it.
 | **Right Shift** | Select | |
 | **Left mouse button** (on the lower screen) | Touch screen | |
 | **Esc** | | Quit |
+
+### Changing the controls
+
+Double-click `mkds.bat` and choose **Change controls**: pick a DS button, press the new key, then **Save and go back**.
+
+Or edit the controls file in any text editor. It is created with the keys above the first time the game starts:
+
+- Windows: `%APPDATA%\MKDS Native Builder\controls.txt`
+- macOS: `~/Library/Application Support/MKDS Native Builder/controls.txt`
+- Linux: `~/.config/mkds-native-builder/controls.txt`
+
+Each line is `Button = Key`, for example `L = Q`. Give a button several keys with commas (`A = Z, Space`) or none (`Select =`).
+Buttons: `A B X Y L R Start Select Up Down Left Right Quit`. Key names: `A`-`Z`, `Key0`-`Key9`, `F1`-`F15`, `Up Down Left
+Right`, `Space Enter Escape Tab Backspace Delete Insert Home End PageUp PageDown`, `LeftShift RightShift LeftCtrl RightCtrl
+LeftAlt RightAlt LeftSuper RightSuper`, `Apostrophe Backquote Backslash Comma Equal LeftBracket RightBracket Minus Period
+Semicolon Slash`, `NumPad0`-`NumPad9 NumPadDot NumPadSlash NumPadAsterisk NumPadMinus NumPadPlus NumPadEnter`,
+`CapsLock NumLock ScrollLock Pause Menu`. Changes apply the next time the game starts, and the file survives rebuilds.
+If the file has a mistake, the game says which line; delete the file to get the default controls back.
+To use a different file once: `play.bat --controls "C:\path\to\controls.txt"`.
 
 ---
 

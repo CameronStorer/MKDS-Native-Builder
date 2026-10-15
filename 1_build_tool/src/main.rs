@@ -140,17 +140,15 @@ fn run() -> Result<i32, BuildError> {
                 "Use --inspect, --rip, --build or --run in a noninteractive terminal.",
             );
         }
-        let launch = tui::run(tui::Config {
-            source: find_source(args.source)?,
-            output: args.out,
+        let source = find_source(args.source)?;
+        tui::run(tui::Config {
+            output: args.out.unwrap_or_else(|| source.join("builds").join("mkds")),
+            source,
             offline: args.offline,
             allow_unverified: args.allow_unverified,
             initial_rom: args.rom,
         })?;
-        return match launch {
-            Some(bundle) => build::launch(&bundle, &args.course.into_iter().collect::<Vec<_>>()),
-            None => Ok(0),
-        };
+        return Ok(0);
     }
     let info = rom::inspect_rom(&args.rom.unwrap())?;
     if args.json {

@@ -3,6 +3,7 @@ mod audio;
 pub mod assets;
 mod script;
 use minifb::{Key, MouseButton, MouseMode, Scale, Window, WindowOptions};
+use mkds_builder::controls::{self, Controls};
 use recomp::{boot::session::Session, dispatch::Dispatcher, mem::Lifted, rt::Mem};
 use std::{
     cell::RefCell,
@@ -30,6 +31,8 @@ pub struct Options {
     pub stats: bool,
     /// Write every button change as `wall_s,guest_frame,guest_s,buttons` (diagnoses double/missed taps).
     pub input_log: Option<PathBuf>,
+    /// Keyboard controls file (default: the user's `controls.txt`, see `mkds_builder::controls`).
+    pub controls: Option<PathBuf>,
 }
 
 impl Options {
@@ -42,6 +45,9 @@ impl Options {
                 "--mute" => result.mute = true,
                 "--stats" => result.stats = true,
                 "--diagnostic-arm7-interpreter" => result.diagnostic_arm7_interpreter = true,
+                "--controls" => {
+                    result.controls = Some(args.next().ok_or("--controls needs a file path")?.into())
+                }
                 "--input-log" => {
                     result.input_log =
                         Some(args.next().ok_or("--input-log needs a file path")?.into())
@@ -316,11 +322,12 @@ fn run_internal(
         table.len(),
         signatures.len()
     );
+    let bindings = Rc::new(if options.headless { Bindings::from(&Controls::default()) } else { load_bindings(&options)? });
     let window = if options.headless {
         None
     } else {
         let mut w = Window::new(
-            "MKDS — user ROM | arrows steer, Z=A X=B, Enter=Start, mouse=touch, Esc=quit",
+            &bindings.title,
             256,
             384,
             WindowOptions {
@@ -363,6 +370,7 @@ fn run_internal(
         let pixels = Rc::clone(&last_pixels);
         let error = Rc::clone(&idle_error);
         let live_input = scripted.is_none();
+        let bindings = Rc::clone(&bindings);
         let mut last_poll = Instant::now();
         session.machine.idle_poll = Some(Box::new(move || {
             if last_poll.elapsed() < Duration::from_millis(8) {
@@ -377,8 +385,8 @@ fn run_internal(
                     ..Default::default()
                 });
             }
-            let quit = !w.is_open() || w.is_key_down(Key::Escape);
-            let (buttons, touch) = if live_input { input(&mut w) } else { (0, None) };
+            let quit = !w.is_open() || bindings.quit(&w);
+            let (buttons, touch) = if live_input { input(&mut w, &bindings) } else { (0, None) };
             Some(recomp::machine::IdleAction {
                 quit,
                 buttons: live_input.then_some(buttons),
@@ -416,11 +424,11 @@ fn run_internal(
                 }
                 if let Some(window) = window.as_ref() {
                     let mut w = window.borrow_mut();
-                    if !w.is_open() || w.is_key_down(Key::Escape) {
+                    if !w.is_open() || bindings.quit(&w) {
                         break;
                     }
                     if scripted.is_none() {
-                        let (buttons, touch) = input(&mut w);
+                        let (buttons, touch) = input(&mut w, &bindings);
                         session.machine.set_input(buttons, touch);
                     }
                 }
@@ -561,7 +569,7 @@ fn run_internal(
                         }
                         std::thread::sleep(ahead.min(Duration::from_millis(4)));
                         if last_present.elapsed() >= Duration::from_millis(14) {
-                            if !w.is_open() || w.is_key_down(Key::Escape) {
+                            if !w.is_open() || bindings.quit(&w) {
                                 break;
                             }
                             w.update_with_buffer(&last_pixels.borrow(), 256, 384)
@@ -671,23 +679,63 @@ thread_local! {
     static DPAD: std::cell::Cell<(u16, u16)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-fn input(window: &mut Window) -> (u16, Option<(u8, u8)>) {
-    let keys = [
-        Key::Z,
-        Key::X,
-        Key::RightShift,
-        Key::Enter,
-        Key::Right,
-        Key::Left,
-        Key::Up,
-        Key::Down,
-        Key::S,
-        Key::A,
-        Key::C,
-        Key::V,
-    ];
-    let buttons = keys.iter().enumerate().fold(0, |bits, (i, k)| {
-        bits | if window.is_key_down(*k) { 1 << i } else { 0 }
+/// Window keys for the DS buttons (bit order A B Select Start Right Left Up Down R L X Y) and for Quit.
+struct Bindings {
+    buttons: [Vec<Key>; 12],
+    quit_keys: Vec<Key>,
+    title: String,
+}
+
+/// `minifb::Key` in declaration order, matching `mkds_builder::controls::KEYS` name for name.
+const KEYS: [Key; 106] = {
+    use Key::*;
+    [
+        Key0, Key1, Key2, Key3, Key4, Key5, Key6, Key7, Key8, Key9, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P,
+        Q, R, S, T, U, V, W, X, Y, Z, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, Down, Left,
+        Right, Up, Apostrophe, Backquote, Backslash, Comma, Equal, LeftBracket, Minus, Period, RightBracket,
+        Semicolon, Slash, Backspace, Delete, End, Enter, Escape, Home, Insert, Menu, PageDown, PageUp, Pause, Space,
+        Tab, NumLock, CapsLock, ScrollLock, LeftShift, RightShift, LeftCtrl, RightCtrl, NumPad0, NumPad1, NumPad2,
+        NumPad3, NumPad4, NumPad5, NumPad6, NumPad7, NumPad8, NumPad9, NumPadDot, NumPadSlash, NumPadAsterisk,
+        NumPadMinus, NumPadPlus, NumPadEnter, LeftAlt, RightAlt, LeftSuper, RightSuper,
+    ]
+};
+
+impl From<&Controls> for Bindings {
+    fn from(c: &Controls) -> Self {
+        let keys = |a: usize| c.keys[a].iter().map(|&k| KEYS[k]).collect::<Vec<_>>();
+        let hint = |a: usize| c.describe(a);
+        Self {
+            buttons: std::array::from_fn(keys),
+            quit_keys: keys(controls::QUIT),
+            title: format!(
+                "MKDS | A={} B={} L={} R={} Start={} | mouse = touch | {} = quit",
+                hint(0), hint(1), hint(9), hint(8), hint(3), hint(controls::QUIT)
+            ),
+        }
+    }
+}
+
+impl Bindings {
+    fn quit(&self, window: &Window) -> bool {
+        self.quit_keys.iter().any(|&k| window.is_key_down(k))
+    }
+}
+
+fn load_bindings(options: &Options) -> Result<Bindings, String> {
+    let Some(path) = options.controls.clone().or_else(controls::default_path) else {
+        eprintln!("Controls: defaults (no settings folder found)");
+        return Ok(Bindings::from(&Controls::default()));
+    };
+    let c = Controls::load_or_create(&path)
+        .map_err(|e| format!("Controls file problem: {e}
+Fix it, or delete it to get the default controls back."))?;
+    eprintln!("Controls: {}", path.display());
+    Ok(Bindings::from(&c))
+}
+
+fn input(window: &mut Window, bindings: &Bindings) -> (u16, Option<(u8, u8)>) {
+    let buttons = bindings.buttons.iter().enumerate().fold(0, |bits, (i, keys)| {
+        bits | if keys.iter().any(|&k| window.is_key_down(k)) { 1 << i } else { 0 }
     });
     let touch = if window.get_mouse_down(MouseButton::Left) {
         window.get_mouse_pos(MouseMode::Discard).and_then(|(x, y)| {
@@ -743,6 +791,21 @@ fn capture(session: &mut Session<'_>, dir: &std::path::Path) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn key_table_matches_the_controls_file_names() {
+        for (key, name) in KEYS.iter().zip(controls::KEYS) {
+            assert_eq!(format!("{key:?}"), name);
+        }
+    }
+
+    #[test]
+    fn default_bindings_keep_the_documented_keys() {
+        let b = Bindings::from(&Controls::default());
+        assert_eq!(b.buttons[0], [Key::Z]);
+        assert_eq!(b.buttons[9], [Key::A], "L (use item) is keyboard A");
+        assert_eq!(b.quit_keys, [Key::Escape]);
+    }
+
     #[cfg(windows)]
     #[test]
     #[ignore = "opens two short-lived native test windows; run explicitly on Windows"]
@@ -774,7 +837,7 @@ mod tests {
         }
         assert!(first.is_key_down(Key::Z));
         assert!(first.is_key_down(Key::Left));
-        assert_eq!(input(&mut first).0, 1 | 32);
+        assert_eq!(input(&mut first, &Bindings::from(&Controls::default())).0, 1 | 32);
         unsafe {
             SendMessageW(handle, 0x201, 1, 0);
         }
@@ -783,7 +846,7 @@ mod tests {
             SetActiveWindow(second.get_window_handle());
         }
         assert_eq!(
-            input(&mut first),
+            input(&mut first, &Bindings::from(&Controls::default())),
             (0, None),
             "inactive window releases all guest input"
         );
@@ -794,7 +857,7 @@ mod tests {
             SendMessageW(handle, 0x202, 0, 0);
         }
         assert!(!first.get_mouse_down(MouseButton::Left));
-        assert_eq!(input(&mut first), (0, None));
+        assert_eq!(input(&mut first, &Bindings::from(&Controls::default())), (0, None));
         unsafe {
             SendMessageW(handle, 0x100, 0x1b, (1 << 16) | 1);
         }
