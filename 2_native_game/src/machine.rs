@@ -39,7 +39,7 @@ pub struct Machine<'a> {
     pub hook_hits: HashMap<u32, u32>,
     /// The game's own ARM7 (crate::arm7), run alongside as hardware time passes.
     pub arm7: Option<crate::arm7::Arm7>,
-    /// Audio produced so far (stereo, 32,768 Hz) and not yet taken by the host; see [`Machine::take_audio`].
+    /// Audio produced so far (stereo, at the configured SPU rate) and not yet taken by the host; see [`Machine::take_audio`].
     audio: Vec<[i16; 2]>,
     /// Diagnostics over the whole run: frames rendered, non-silent frames, peak amplitude.
     pub audio_stats: (u64, u64, i32),
@@ -358,7 +358,20 @@ impl Machine<'_> {
         }
     }
 
-    /// Takes the audio rendered since the last call (stereo frames at [`crate::spu::SAMPLE_RATE`]).
+    /// Set the device rate before running the machine (defaults to the DS rate).
+    /// Discards buffered audio from the previous rate when changing a running machine.
+    pub fn set_audio_rate(&mut self, hz: u32) {
+        assert!(hz > 0, "audio output rate must be nonzero");
+        if let Some(a) = self.arm7.as_mut() {
+            if a.s.spu.output_rate() != hz {
+                a.s.spu.set_output_rate(hz);
+                a.s.audio_out.clear();
+                self.audio.clear();
+            }
+        }
+    }
+
+    /// Takes audio rendered since the last call (stereo frames at the configured SPU output rate).
     pub fn take_audio(&mut self) -> Vec<[i16; 2]> {
         std::mem::take(&mut self.audio)
     }
