@@ -1,0 +1,9 @@
+# build outputs (never commit generated code, unpacked game files or built games)
+target/
+target_*/
+builds/
+assets/
+source/
+*.nds
+*.srl
+*.sav

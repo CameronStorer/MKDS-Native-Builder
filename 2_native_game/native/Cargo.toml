@@ -1,0 +1,27 @@
+[package]
+name = "mkds_native"
+version = "0.1.0"
+edition = "2024"
+description = "Native window, audio and input host for locally generated MKDS Rust code"
+
+[dependencies]
+recomp = { path = "..", default-features = false }
+mkds_builder = { path = "../../1_build_tool" }
+minifb = "=0.28.0"
+cpal = "=0.17.3"
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+
+[features]
+# The reference interpreter (diagnostics and `mkds_runtime_probe`). Generated games depend on mkds_native with
+# `default-features = false`, so the interpreter is not compiled into the shipped game.
+default = ["interpreter"]
+interpreter = ["recomp/interpreter"]
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[[bin]]
+name = "mkds_runtime_probe"
+path = "src/main.rs"
+required-features = ["interpreter"]

@@ -1,0 +1,138 @@
+# MKDS Native Builder
+
+Turn **your own copy of MKDS** (the Nintendo DS game, USA version) into a **native Windows program**, built on your own PC.
+
+This repository contains **no game**: no ROM, no game code, no graphics, sounds or other game files. You supply your own `.nds`
+file; the builder reads it on your machine, translates the game's machine code into Rust source code, compiles it and gives you a
+`play.exe`. Nothing from the game ever leaves your computer.
+
+---
+
+## Quick start (Windows 10/11, 64-bit)
+
+**1. Install Rust** (one time)
+- Download and run `rustup-init.exe` from **https://rustup.rs** and accept the defaults.
+- If it asks to install the **Visual Studio C++ Build Tools**, say yes (Rust needs them on Windows).
+- Close and reopen any terminal windows afterwards.
+
+**2. Get this repository**
+- Click **Code -> Download ZIP** on GitHub and unzip it (for example to `C:\MKDS Native Builder`), **or** run
+  `git clone https://github.com/CameronStorer/mkds-native-builder`.
+
+**3. Build** (one command)
+- Open the folder, click the address bar, type `cmd` and press Enter. Then run:
+  ```
+  build.bat "C:\path\to\your\game.nds"
+  ```
+- The first build takes **about 10-20 minutes** (it downloads the Rust libraries it needs and compiles everything). You will see
+  progress in five steps. Rebuilds are much faster (often under a minute).
+
+**4. Play**
+  ```
+  play.bat
+  ```
+  (or double-click `builds\mkds\play.exe`).
+
+That's it.
+
+---
+
+## Controls
+
+| Keyboard | DS button | In the game |
+|---|---|---|
+| **Z** | A | Accelerate / confirm |
+| **X** | B | Brake / back |
+| **S** | R | Hop / drift |
+| **A** | L | Use item |
+| **C** / **V** | X / Y | |
+| **Arrow keys** | D-pad | Steer / menus |
+| **Enter** | Start | Pause / start |
+| **Right Shift** | Select | |
+| **Left mouse button** (on the lower screen) | Touch screen | |
+| **Esc** | | Quit |
+
+---
+
+## What you need
+
+- **Your own ROM** of MKDS, USA version: game code `AMCE`, revision 0. Make it from a cartridge you own. Other versions are refused
+  with a clear message (they are not supported yet).
+- Windows 10 or 11 (64-bit), about **2 GB** free disk space and **8 GB RAM** recommended.
+- Rust (step 1). An internet connection for the **first** build only.
+
+---
+
+## What the build produces
+
+Everything goes into `builds\mkds\` (ignored by git, so it can never be uploaded by accident):
+
+| Item | What it is |
+|---|---|
+| `play.exe` | Starts the game after checking that none of your game files were changed or are missing |
+| `game.exe` | The compiled game |
+| `assets\` | The game's files, unpacked from your ROM |
+| `source\` | The Rust code generated from your ROM: you can read it and rebuild it yourself |
+| `manifest.json` | Fingerprints (SHA-256) of your ROM, the files, the generated code and the program |
+
+**Please do not share `assets\`, `source\` or the built game** - they are made from your copy of the game.
+
+---
+
+## Options
+
+Run `build.bat "game.nds" "C:\some\other\empty\folder"` to build somewhere else. Advanced users can call the builder directly:
+
+```
+1_build_tool\target\release\mkds_builder.exe "game.nds" --inspect                 check the ROM only
+1_build_tool\target\release\mkds_builder.exe "game.nds" --rip --out FOLDER        only unpack the game files
+1_build_tool\target\release\mkds_builder.exe "game.nds" --build --out FOLDER      full build
+```
+
+Useful build options: `--offline` (no network, once everything is downloaded), `--jobs N` (how many CPU cores to use),
+`--no-cache` (fresh build), `--clear-cache` (delete the build cache in `%LOCALAPPDATA%\mkds_builder`), `--no-source` (don't keep `source\`).
+
+Game options (after `play.exe`): `--mute`, `--stats` (prints speed and frame counters once a second).
+
+---
+
+## Troubleshooting
+
+| Message | What to do |
+|---|---|
+| `Rust is not installed` / `cargo is not recognized` | Do step 1, then open a **new** terminal window. |
+| `Output must be empty` | The folder already has a build. Delete `builds\mkds` or give a different output folder. |
+| `Unsupported ROM ... expected AMCE revision 0` | Only the USA version, revision 0, is supported right now. |
+| `This ROM differs from the reference` | Your file is not a clean copy (modified or a different dump). |
+| `Asset changed: ...` | A game file in `builds\mkds\assets` was edited or deleted. Build again. |
+| Linker / `link.exe` errors | Install the Visual Studio C++ Build Tools (step 1) and try again. |
+| The build fails with a Cargo error | Run it again with an internet connection; if it still fails, open an issue with the message. |
+
+---
+
+## How it works (short version)
+
+1. **Check** - your ROM is identified by its fingerprint; unsupported or changed files are refused.
+2. **Unpack** - the game's files are copied out of the ROM into `assets\` with a fingerprint list.
+3. **Translate** - every function of the game's two processors (ARM9 and ARM7) is translated from ARM machine code into Rust. The
+   list of where functions start (`4_docs/FUNCTION_BOUNDARIES.csv`, addresses only) guides this; the code itself comes from your ROM.
+4. **Compile** - Rust compiles the generated code together with a small runtime that provides the DS hardware (screens, sound,
+   input, timers) on your PC.
+5. **Package** - `play.exe`, `game.exe`, `assets\`, `source\` and the fingerprints are placed in the output folder.
+
+No instruction is emulated at run time: the shipped game contains no interpreter. The DS graphics and sound chips are still recreated
+in software (that is why it uses some CPU); moving them to the graphics card is the next milestone.
+
+Research notes and progress: **https://docs.cameronstorer.com/mkds-decomp-docs/**
+
+## Status
+
+- Tested: menus, Grand Prix races (Mushroom, Flower, Shell cups), Mission 1-1, Battle mode, full races through the results screen;
+  real-time speed and clean audio on a 6-core PC.
+- Known issues: occasional stutter, the race position badge can show the wrong number, rare visual glitches, the in-game keyboard
+  may repeat keys.
+
+## Legal
+
+This project is not affiliated with or endorsed by Nintendo. It contains no copyrighted game data and does not download any. You need
+a ROM you made from a cartridge you own. Do not distribute ROMs, unpacked game files, generated source or built games.
