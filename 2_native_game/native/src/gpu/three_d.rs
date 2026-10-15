@@ -7,16 +7,18 @@
 //!   Alpha 0 means "no 3D pixel here" to the 2D compositor, exactly as in the software layer.
 //! - Same inputs and rules as `recomp::raster::render`: viewport, near-plane clipping, perspective-correct colour and
 //!   texture coordinates, every texture format through `recomp::texture` decoding (decode on the CPU, cache on the
-//!   GPU keyed by texture parameters + palette base + a hash of the bytes used), wrap/repeat/flip, modulation and
+//!   GPU keyed by a stable content ID independent of VRAM addresses), wrap/repeat/flip, modulation and
 //!   decal modes, front/back face selection, depth test (less, or equal-within-tolerance), translucent depth writes
 //!   only when flagged, polygon alpha blending in submission order, shadow-volume masks and polygon-ID rejection.
 //! - At scale 1, `render_compare` must report >= 99% identical pixels per frame and none below 97% against
 //!   `RenderSnapshot::layer3d`; remaining differences must be explained (e.g. rounding of interpolation).
 use super::Gpu;
 use recomp::{gx::Polygon, machine::RenderSnapshot};
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 #[path = "texture_cache.rs"]
 mod texture_cache;
+#[path = "texture_pack.rs"]
+mod texture_pack;
 
 // Each pixel owns its depth, shadow stencil and two polygon IDs for the entire
 // dispatch. This avoids framebuffer readback, inter-draw hazards and restrictions
@@ -125,6 +127,17 @@ impl Renderer3d {
             cache: texture_cache::TextureCache::new(&gpu.device),
         }
     }
+    /// Start/stop asynchronous RGBA8 texture dumping. Changing this setting (or
+    /// dropping the renderer) drains the old writer; render calls never wait on PNG I/O.
+    pub fn set_texture_dump(&mut self, directory: Option<PathBuf>) {
+        self.cache.set_dump(directory);
+    }
+    /// Index lowercase 16-hex-digit PNG names. Returns the candidate file count;
+    /// dimensions and RGBA8 encoding are checked lazily when an ID is first used.
+    /// A failed directory read leaves the current pack intact. Reload to retry files.
+    pub fn set_texture_pack(&mut self, directory: Option<PathBuf>) -> Result<usize, String> {
+        self.cache.set_pack(directory)
+    }
     pub fn scale(&self) -> u32 {
         self.scale
     }
@@ -172,12 +185,9 @@ impl Renderer3d {
             {
                 continue;
             }
-            let offset = *textures
+            let (offset, factor) = *textures
                 .entry((p.tex_param, p.pltt_base))
-                .or_insert_with(|| {
-                    self.cache
-                        .get(&gpu.queue, p.tex_param, p.pltt_base, &tex, &pal)
-                });
+                .or_insert_with(|| self.cache.get(p.tex_param, p.pltt_base, &tex, &pal));
             for k in 1..screen.len() - 1 {
                 let v = [screen[0], screen[k], screen[k + 1]];
                 let det = (v[1][0] - v[0][0]) * (v[2][1] - v[0][1])
@@ -239,7 +249,10 @@ impl Renderer3d {
                         edge1.map(|v| v as f32),
                         edge2.map(|v| v as f32),
                     ],
-                    a: convert(origin),
+                    a: Vertex {
+                        uv: [origin[7] as f32, origin[8] as f32, factor as f32, 0.0],
+                        ..convert(origin)
+                    },
                     b: convert(dx),
                     c: convert(dy),
                     meta: [p.attr, p.tex_param, offset, epoch],
@@ -251,6 +264,7 @@ impl Renderer3d {
                 }
             }
         }
+        self.cache.upload(&gpu.device, &gpu.queue);
         let mut bins = vec![0u32; 769];
         for (i, tile) in tiles.iter().enumerate() {
             bins[i] = bins.len() as u32;
@@ -308,7 +322,7 @@ impl Renderer3d {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.cache.buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::TextureView(&self.cache.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -553,6 +567,149 @@ mod tests {
         }
     }
 
+    #[test]
+    fn nearest_pack_is_exact_at_scales_one_and_two() {
+        let gpu = Gpu::headless().expect("GPU required for texture pack regression");
+        let root = std::env::temp_dir().join("codex_b2_tex");
+        std::fs::create_dir_all(&root).unwrap();
+        let dump = tempfile::tempdir_in(&root).unwrap();
+        let pack = tempfile::tempdir_in(&root).unwrap();
+        let mut snap = snapshot();
+        snap.io[0x240] = 0x83;
+        snap.io[0x244] = 0x83;
+        for (i, b) in snap.vram[0].iter_mut().enumerate() {
+            *b = i.wrapping_mul(37) as u8;
+        }
+        for (i, b) in snap.vram[4].iter_mut().enumerate() {
+            *b = i.wrapping_mul(13) as u8;
+        }
+        let mut scenes = Vec::new();
+        for format in 1..=7 {
+            for wrap in [0, 3 << 16, (3 << 16) | (3 << 18)] {
+                let mut p = triangle(0, 0x7fff, ATTR);
+                p.tex_param = (format << 26) | wrap | (1 << 29);
+                p.verts[0].st = [-511, -257];
+                p.verts[1].st = [777, 33];
+                p.verts[2].st = [19, 799];
+                scenes.push(p);
+            }
+        }
+        let mut r = Renderer3d::new(&gpu, 1);
+        // Toggle dumping after caching: existing entries must still be dumped.
+        snap.polys = vec![scenes[0].clone()];
+        r.render(&gpu, &snap);
+        r.set_texture_dump(Some(dump.path().into()));
+        for p in &scenes {
+            snap.polys = vec![p.clone()];
+            r.render(&gpu, &snap);
+        }
+        r.set_texture_dump(None);
+        let files: Vec<_> = std::fs::read_dir(dump.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 7, "wrap modes share IDs");
+        for path in files {
+            let (w, h, px) = texture_pack::read_png(&path).unwrap();
+            let mut up = Vec::new();
+            for y in 0..h * 2 {
+                for x in 0..w * 2 {
+                    up.push(px[((y / 2) * w + x / 2) as usize]);
+                }
+            }
+            texture_pack::write_png(
+                &pack.path().join(path.file_name().unwrap()),
+                w * 2,
+                h * 2,
+                &up,
+            )
+            .unwrap();
+        }
+        for scale in [1, 2] {
+            let mut original = Renderer3d::new(&gpu, scale);
+            let mut replaced = Renderer3d::new(&gpu, scale);
+            assert_eq!(
+                replaced.set_texture_pack(Some(pack.path().into())).unwrap(),
+                7
+            );
+            for p in &scenes {
+                snap.polys = vec![p.clone()];
+                let expected = gpu.read_rgba(original.render(&gpu, &snap));
+                let actual = gpu.read_rgba(replaced.render(&gpu, &snap));
+                assert_eq!(actual, expected, "scale {scale}, reg {:08x}", p.tex_param);
+            }
+            replaced.set_texture_pack(None).unwrap();
+            assert_eq!(
+                gpu.read_rgba(original.render(&gpu, &snap)),
+                gpu.read_rgba(replaced.render(&gpu, &snap))
+            );
+            // A pack is truly sampled, including alpha-zero rejection.
+            let (tex, pal) = snap.texture_memory();
+            let p = recomp::texture::TexParams::from_reg(snap.polys[0].tex_param);
+            let id = texture_cache::fingerprint(&p, 0, &tex, &pal);
+            let path = pack.path().join(format!("{id:016x}.png"));
+            std::fs::remove_file(&path).unwrap();
+            texture_pack::write_png(&path, 16, 16, &[0; 256]).unwrap();
+            replaced.set_texture_pack(Some(pack.path().into())).unwrap();
+            assert!(
+                gpu.read_rgba(replaced.render(&gpu, &snap))
+                    .iter()
+                    .all(|p| *p == 0)
+            );
+            // Restore for the next renderer scale.
+            let px = recomp::texture::decode(&p, 0, &tex, &pal);
+            let up: Vec<_> = (0..256)
+                .map(|i| px[(i / 16 / 2) * 8 + i % 16 / 2])
+                .collect();
+            std::fs::remove_file(&path).unwrap();
+            texture_pack::write_png(&path, 16, 16, &up).unwrap();
+        }
+    }
+
+    #[test]
+    fn replacement_detail_obeys_fractional_wrap_flip_and_clamp() {
+        let gpu = Gpu::headless().expect("GPU required for replacement sampling test");
+        let root = std::env::temp_dir().join("codex_b2_tex");
+        std::fs::create_dir_all(&root).unwrap();
+        let pack = tempfile::tempdir_in(root).unwrap();
+        let mut snap = snapshot();
+        snap.io[0x240] = 0x83;
+        snap.vram[0][..128].fill(255);
+        let p = recomp::texture::TexParams::from_reg(7 << 26);
+        let (tex, pal) = snap.texture_memory();
+        let id = texture_cache::fingerprint(&p, 0, &tex, &pal);
+        let pixels: Vec<u32> = (0..256)
+            .map(|i| ((i % 16 * 16) << 24) | ((i / 16 * 16) << 16) | 255)
+            .collect();
+        texture_pack::write_png(&pack.path().join(format!("{id:016x}.png")), 16, 16, &pixels)
+            .unwrap();
+        let mut r = Renderer3d::new(&gpu, 1);
+        r.set_texture_pack(Some(pack.path().into())).unwrap();
+        for wrap in [0, 3 << 16, (3 << 16) | (3 << 18)] {
+            for st in [
+                -257i32, -129, -128, -127, -17, -16, -15, -1, 0, 1, 7, 8, 15, 16, 127, 128, 129,
+                255, 256,
+            ] {
+                let mut poly = triangle(0, 0x7fff, ATTR);
+                poly.tex_param = (7 << 26) | wrap;
+                for v in &mut poly.verts {
+                    v.st = [st as i16, -st as i16];
+                }
+                snap.polys = vec![poly];
+                let mut high = recomp::texture::TexParams::from_reg(snap.polys[0].tex_param);
+                high.width *= 2;
+                high.height *= 2;
+                let (x, y) = recomp::texture::wrap(&high, st.div_euclid(8), (-st).div_euclid(8));
+                let actual = gpu.read_rgba(r.render(&gpu, &snap));
+                assert_eq!(
+                    actual[96 * 256 + 128],
+                    pixels[y * 16 + x],
+                    "wrap {wrap:x}, st {st}"
+                );
+            }
+        }
+    }
+
     /// Run explicitly with a local snapshot path; no game data is stored in tests.
     #[test]
     #[ignore = "set MKDS_GPU_BENCH_SNAPSHOT to a local race snapshot"]
@@ -588,6 +745,9 @@ mod tests {
         let path = std::env::var("MKDS_GPU_BENCH_SNAPSHOT").expect("local snapshot path");
         let snap = RenderSnapshot::decode(&std::fs::read(path).unwrap()).unwrap();
         let mut renderer = Renderer3d::new(&gpu, 1);
+        if let Some(pack) = std::env::var_os("MKDS_GPU_BENCH_PACK") {
+            renderer.set_texture_pack(Some(pack.into())).unwrap();
+        }
         for _ in 0..10 {
             renderer.render(&gpu, &snap);
         }

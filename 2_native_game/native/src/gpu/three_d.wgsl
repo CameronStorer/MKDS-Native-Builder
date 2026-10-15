@@ -3,7 +3,7 @@ struct Triangle { edges: array<vec4<f32>, 3>, a: Vertex, b: Vertex, c: Vertex, f
 struct Frame { clear: vec4<f32>, scale: u32, pad0: u32, pad1: u32, pad2: u32 }
 @group(0) @binding(0) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(1) var<storage, read> bins: array<u32>;
-@group(0) @binding(2) var<storage, read> texels: array<u32>;
+@group(0) @binding(2) var texels: texture_2d_array<u32>;
 @group(0) @binding(3) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(4) var<uniform> frame: Frame;
 fn unpack(v: u32) -> vec4<f32> {
@@ -14,6 +14,19 @@ fn wrap(v: i32, size: i32, repeat: bool, flip: bool) -> u32 {
     let period = size * select(1, 2, flip);
     let m = ((v % period) + period) % period;
     return u32(select(m, 2 * size - 1 - m, flip && m >= size));
+}
+// Wrap the integer coordinate in original space, then mirror/clamp the
+// fractional position too. This keeps high-resolution detail continuous at seams.
+fn replacement_axis(v: i32, wrapped: u32, sub: u32, size: u32, factor: u32, repeat: bool, flip: bool) -> u32 {
+    if !repeat {
+        if v < 0 { return 0u; }
+        if v >= i32(size) { return size * factor - 1u; }
+    }
+    var part = min(sub, factor - 1u);
+    let period = i32(size * 2u);
+    let m = ((v % period) + period) % period;
+    if repeat && flip && m >= i32(size) { part = factor - 1u - part; }
+    return wrapped * factor + part;
 }
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -43,11 +56,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         var alpha = f32((attr >> 16u) & 31u) / 31.0;
         let reg = tri.flags.y;
         if ((reg >> 26u) & 7u) != 0u {
-            let uv = vec2<i32>(floor((tri.a.uv.xy + pixel.x * tri.b.uv.xy + pixel.y * tri.c.uv.xy) / iw));
+            let coord = (tri.a.uv.xy + pixel.x * tri.b.uv.xy + pixel.y * tri.c.uv.xy) / iw;
+            let uv = vec2<i32>(floor(coord));
             let width = 8u << ((reg >> 20u) & 7u); let height = 8u << ((reg >> 23u) & 7u);
             let x = wrap(uv.x, i32(width), (reg & (1u << 16u)) != 0u, (reg & (1u << 18u)) != 0u);
             let y = wrap(uv.y, i32(height), (reg & (1u << 17u)) != 0u, (reg & (1u << 19u)) != 0u);
-            let t = unpack(texels[tri.flags.z + y * width + x]);
+            let factor = u32(tri.a.uv.z);
+            var at = tri.flags.z + y * width + x;
+            if factor > 1u {
+                let sub = vec2<u32>(floor(fract(coord) * f32(factor)));
+                let sx = replacement_axis(uv.x, x, sub.x, width, factor, (reg & (1u << 16u)) != 0u, (reg & (1u << 18u)) != 0u);
+                let sy = replacement_axis(uv.y, y, sub.y, height, factor, (reg & (1u << 17u)) != 0u, (reg & (1u << 19u)) != 0u);
+                at = tri.flags.z + sy * width * factor + sx;
+            }
+            let t = unpack(textureLoad(texels, vec2<i32>(i32(at & 1023u), i32((at >> 10u) & 1023u)), i32(at >> 20u), 0).r);
             if t.a == 0.0 { continue; }
             if ((attr >> 4u) & 3u) == 1u || shadow { rgb = t.rgb * t.a + rgb * (1.0 - t.a); }
             else { rgb *= t.rgb; alpha *= t.a; }
