@@ -440,6 +440,9 @@ struct Presenter {
     scale: u32,
     display: Display,
     showing_gpu: bool,
+    /// The adapter can run the GPU renderer (compute shaders, writable RGBA8 storage textures); otherwise GPU frames
+    /// are finished on the CPU.
+    compute_ok: bool,
 }
 
 impl Presenter {
@@ -529,12 +532,19 @@ impl Presenter {
             multiview_mask: None,
             cache: None,
         });
+        let downlevel = gpu.adapter.get_downlevel_capabilities();
+        let storage = gpu.adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm).allowed_usages;
+        let compute_ok = downlevel.flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            && storage.contains(wgpu::TextureUsages::STORAGE_BINDING);
+        if !compute_ok {
+            eprintln!("This graphics adapter cannot run the GPU renderer; the CPU finishes each frame (as --renderer software).");
+        }
         let layout = Layout::fit(config.width, config.height, display.side_by_side);
         let scale = display.scale.unwrap_or_else(|| layout.auto_scale());
         eprintln!("Display: {} renderer at {scale}x, {}", gpu.adapter.get_info().name, if display.scale.is_none() { "Auto" } else { "fixed" });
         Ok(Presenter {
             window, gpu, surface, config, screens, bind, bind_layout, sampler, pipeline, layout,
-            rgba: vec![0; (W * H * 4) as usize], gpu_path: None, scale, display, showing_gpu: false,
+            rgba: vec![0; (W * H * 4) as usize], gpu_path: None, scale, display, showing_gpu: false, compute_ok,
         })
     }
 
@@ -569,6 +579,16 @@ impl Presenter {
     }
 
     fn draw(&mut self, frame: Option<Frame>) -> Result<(), String> {
+        let frame = match frame {
+            // No compute support: the same frame, finished on the CPU (software 3D layer + the split's own compose).
+            Some(Frame::Gpu(f)) if !self.compute_ok => {
+                let layer = f.snap.layer3d();
+                let (a, b) = (f.a.compose(Some(&layer)), f.b.compose(None));
+                let (top, bottom) = if f.a_top { (a, b) } else { (b, a) };
+                Some(Frame::Pixels(top.into_iter().chain(bottom).map(|p| p >> 8).collect()))
+            }
+            other => other,
+        };
         if let Some(Frame::Gpu(f)) = &frame {
             if self.gpu_path.is_none() {
                 let renderer = Renderer3d::new(&self.gpu, self.scale);
