@@ -1,5 +1,6 @@
 //! Screen compositor (block 2 stage B2.3): both screens from the two engines' [`Split`]s and the 3D layer, at the 3D
-//! layer's scale. The shader (`compose.wgsl`) is `Split::pixel`, sample by sample.
+//! layer's scale. The shader (`compose.wgsl`) is `Split::pixel`, sample by sample. `render_raw` builds the split
+//! buffers on the GPU; `render` accepts CPU splits for comparison.
 use super::Gpu;
 use recomp::gfx2d::Split;
 
@@ -35,6 +36,7 @@ pub struct Compositor {
     uniform: wgpu::Buffer,
     output: wgpu::Texture,
     staging: Vec<u32>,
+    two_d: Option<super::two_d::Renderer2d>,
 }
 
 impl Compositor {
@@ -46,7 +48,7 @@ impl Compositor {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: (2 * PIXELS * 4) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             })
         };
@@ -87,6 +89,7 @@ impl Compositor {
             }),
             output,
             staging: vec![0; 2 * PIXELS],
+            two_d: None,
         }
     }
 
@@ -124,6 +127,64 @@ impl Compositor {
         };
         let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, pad: [0; 2] };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
+        self.dispatch(gpu, layer3d)
+    }
+
+    pub fn prepare_raw(&mut self, gpu: &Gpu) {
+        self.two_d.get_or_insert_with(|| super::two_d::Renderer2d::new(gpu));
+    }
+
+    /// Build the split buffers on the GPU directly from the raw snapshot.
+    pub fn render_raw(&mut self, gpu: &Gpu, snap: &recomp::machine::RenderSnapshot, layer3d: &wgpu::Texture) -> &wgpu::Texture {
+        assert_eq!((layer3d.width(), layer3d.height()), (256 * self.scale, 192 * self.scale), "3D layer scale");
+        let renderer = self.two_d.get_or_insert_with(|| super::two_d::Renderer2d::new(gpu));
+        renderer.render(gpu, snap, &self.base, &self.other, &self.info);
+        let engine = |offset: usize| {
+            let r = |a: usize| u16::from_le_bytes([snap.io[offset + a], snap.io[offset + a + 1]]) as u32;
+            let d = r(0) | r(2) << 16;
+            let active = (d >> 16) & 3 == 1 && d & 0x80 == 0;
+            Engine { eva: (r(0x52) & 31).min(16), evb: ((r(0x52) >> 8) & 31).min(16),
+                bright_mode: (r(0x50) >> 6) & 3, bright: (r(0x54) & 31).min(16),
+                master_mode: if active { r(0x6c) >> 14 } else { 0 },
+                master: if active { (r(0x6c) & 31).min(16) } else { 0 }, pad: [0; 2] }
+        };
+        let frame = Frame { engines: [engine(0), engine(0x1000)], scale: self.scale,
+            a_top: ((snap.io[0x305] >> 7) & 1) as u32, pad: [0; 2] };
+        gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
+        self.dispatch(gpu, layer3d)
+    }
+
+    /// Comparison only: verify every split record, including records hidden by the current 3D layer.
+    pub fn split_differences(&self, gpu: &Gpu, a: &Split, b: &Split) -> usize {
+        let size = (2 * PIXELS * 4) as u64;
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("2D comparison"), size: size * 3,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for (i, source) in [&self.base, &self.other, &self.info].into_iter().enumerate() {
+            encoder.copy_buffer_to_buffer(source, 0, &buffer, i as u64 * size, size);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("2D readback"));
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("2D completion");
+        let bytes = buffer.slice(..).get_mapped_range().expect("2D mapped range");
+        let words: &[u32] = bytemuck::cast_slice(&bytes);
+        let mut differences = 0;
+        for (engine, s) in [a,b].into_iter().enumerate() {
+            for i in 0..PIXELS {
+                let at = engine * PIXELS + i;
+                differences += usize::from(words[at] != s.base[i] || words[2 * PIXELS + at] != s.other[i] || words[4 * PIXELS + at] != s.info[i] as u32);
+            }
+        }
+        differences
+    }
+
+    pub fn uploaded_2d(&self) -> usize {
+        self.two_d.as_ref().map_or(0, |r| r.uploaded)
+    }
+
+    fn dispatch(&self, gpu: &Gpu, layer3d: &wgpu::Texture) -> &wgpu::Texture {
         let view3d = layer3d.create_view(&Default::default());
         let out = self.output.create_view(&Default::default());
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
