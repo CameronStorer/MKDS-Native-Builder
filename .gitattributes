@@ -1,2 +1,4 @@
 # Shell scripts must retain Unix line endings in Windows checkouts too.
 *.sh text eol=lf
+# Batch files keep Windows line endings (cmd.exe can misread LF-only scripts).
+*.bat text eol=crlf
