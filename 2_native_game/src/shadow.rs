@@ -16,6 +16,14 @@ use std::collections::{BTreeMap, HashMap};
 const STACK_FRAME: u32 = 1024;
 const MATH: std::ops::Range<u32> = 0x0400_0280..0x0400_02c0;
 
+/// Hardware registers that behave like memory (writing the same value twice changes nothing): the 2D
+/// engines' registers and the 3D engine's tables (edge colours, alpha test, clear colour/depth, fog,
+/// toon). Their writes are compared in order instead of refusing the native; command ports and FIFOs
+/// (geometry 0x0400_0400.., DMA, timers, IPC) are never written twice.
+fn plain_io(a: u32) -> bool {
+    (0x0400_0000..0x0400_0070).contains(&a) || (0x0400_1000..0x0400_1070).contains(&a) || (0x0400_0330..0x0400_03c0).contains(&a)
+}
+
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Tally {
     pub calls: u64,
@@ -42,8 +50,9 @@ struct Effect {
     bytes: BTreeMap<u32, u8>,
     /// Math-unit register writes in order: (address, width, value).
     math: Vec<(u32, u8, u32)>,
-    /// Hardware writes outside the math unit (never rolled back; must not happen in a leaf we shadow).
+    /// Hardware writes outside the math unit, in order (not rolled back: only [`plain_io`] is allowed).
     other_io: Vec<(u32, u8, u32)>,
+    unsafe_io: bool,
 }
 
 /// A bus that journals writes on top of the game's bus.
@@ -54,6 +63,8 @@ struct Journal<'a> {
     bytes: BTreeMap<u32, u8>,
     math: Vec<(u32, u8, u32)>,
     other_io: Vec<(u32, u8, u32)>,
+    /// A write to hardware that is not [`plain_io`].
+    unsafe_io: bool,
     frame: std::ops::Range<u32>,
 }
 
@@ -64,6 +75,9 @@ impl Journal<'_> {
                 self.math.push((a, width, v));
             } else {
                 self.other_io.push((a, width, v));
+                if !plain_io(a) {
+                    self.unsafe_io = true;
+                }
             }
             return true;
         }
@@ -105,7 +119,7 @@ impl Bus for Journal<'_> {
 
 fn effect(next: u32, c: &Cpu, j: Journal) -> (Effect, Vec<(u32, u8)>) {
     let regs = [c.r[0], c.r[1], c.r[2], c.r[3], c.r[12], c.r[13], c.r[14]];
-    let e = Effect { next, regs, flags: [c.n, c.z, c.c, c.v], bytes: j.bytes, math: j.math, other_io: j.other_io };
+    let e = Effect { next, regs, flags: [c.n, c.z, c.c, c.v], bytes: j.bytes, math: j.math, other_io: j.other_io, unsafe_io: j.unsafe_io };
     (e, j.undo)
 }
 
@@ -133,7 +147,7 @@ impl Shadow {
         let args = entry_regs(&entry);
         let frame = entry.r[13].wrapping_sub(STACK_FRAME)..entry.r[13];
         // 1. the exact translation, journaled, with all the budget it needs
-        let mut j = Journal { inner: m, undo: Vec::new(), bytes: BTreeMap::new(), math: Vec::new(), other_io: Vec::new(), frame: frame.clone() };
+        let mut j = Journal { inner: m, undo: Vec::new(), bytes: BTreeMap::new(), math: Vec::new(), other_io: Vec::new(), unsafe_io: false, frame: frame.clone() };
         c.budget = u32::MAX / 2;
         let next = original(c, &mut j, pc);
         let used = (u32::MAX / 2 - c.budget) as u64;
@@ -144,13 +158,13 @@ impl Shadow {
         }
         *c = entry;
         // 3. the native, for real
-        let mut j = Journal { inner: m, undo: Vec::new(), bytes: BTreeMap::new(), math: Vec::new(), other_io: Vec::new(), frame };
+        let mut j = Journal { inner: m, undo: Vec::new(), bytes: BTreeMap::new(), math: Vec::new(), other_io: Vec::new(), unsafe_io: false, frame };
         let next = f(c, &mut j, pc);
         let (native_effect, _) = effect(next, c, j);
         let t = self.tally.entry(native.name).or_default();
         t.calls += 1;
         t.instructions += used;
-        if native_effect != exact || !exact.other_io.is_empty() {
+        if native_effect != exact || exact.unsafe_io {
             t.mismatches += 1;
             if self.reports.len() < Self::KEEP {
                 self.reports.push(describe(native, pc, &args, &exact, &native_effect));
@@ -198,8 +212,11 @@ fn describe(n: &Native, pc: u32, args: &[u32; 4], exact: &Effect, native: &Effec
     if exact.math != native.math {
         d.push(format!("math-unit writes differ ({} vs {})", native.math.len(), exact.math.len()));
     }
-    if !exact.other_io.is_empty() {
-        d.push(format!("the translation writes hardware {:#x}: not a leaf to shadow", exact.other_io[0].0));
+    if exact.other_io != native.other_io {
+        d.push(format!("hardware writes differ ({} vs {})", native.other_io.len(), exact.other_io.len()));
+    }
+    if let Some(w) = exact.other_io.iter().find(|w| !plain_io(w.0)) {
+        d.push(format!("the translation writes hardware {:#x}: not a leaf to shadow", w.0));
     }
     format!("{} at {pc:#x} (r0-r3 {:x?}): {}", n.name, args, d.join("; "))
 }

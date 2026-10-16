@@ -66,8 +66,16 @@ pub static NATIVE: &[Native] = &[
 ];
 
 /// The natives that passed the shadow checker over whole recorded races (`native-verified` in the
-/// dictionary): what the game installs.
-pub static VERIFIED: &[Native] = &[];
+/// dictionary): what the game installs. Evidence (2026-10-16, GP race to the finish, `MKDS_SHADOW=1`):
+/// calls without a mismatch in brackets; natives with fewer than 50 calls stay on trial.
+pub static VERIFIED: &[Native] = &[
+    Native { segment: "arm9_main", entry: 0x0200_fe74, name: "MATH_CountLeadingZeros", f: sdk::count_leading_zeros_block }, // [91]
+    Native { segment: "arm9_main", entry: 0x0213_3048, name: "msl_multiply_u64", f: sdk::multiply64_block }, // [21,538]
+    Native { segment: "arm9_main", entry: 0x0213_a434, name: "strlen", f: sdk::strlen_block }, // [763]
+    Native { segment: "arm9_main", entry: 0x0214_cfe4, name: "MIi_CpuClear16", f: sdk::fill16_block }, // [89]
+    Native { segment: "arm9_main", entry: 0x0214_d05c, name: "MIi_CpuClearFast", f: sdk::fill_fast_block }, // [74,473]
+    Native { segment: "arm9_main", entry: 0x0214_d168, name: "MI_CpuFill8", f: sdk::fill8_block }, // [120]
+];
 
 /// What a game or tool installs: [`VERIFIED`], or for diagnostics per `MKDS_NATIVES`: `off` = none (the
 /// exact translation everywhere), `all` = every [`NATIVE`] including those on trial.
