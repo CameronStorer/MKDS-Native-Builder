@@ -502,7 +502,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x0200FD74,arm9_main,os_probably_one_time_subsystem_init_sets_0200fd74,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0200FDDC,arm9_main,os_probably_copies_fields_from_a_config_0200fddc,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0200FE58,arm9_main,os_thin_wrapper_calls_function_pointer_at_0200fe58,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0200FE74,arm9_main,MATH_CountLeadingZeros,sdk,value:u32,u32,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x0200FE74,arm9_main,MATH_CountLeadingZeros,sdk,value:u32,u32,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x0200FE7C,arm9_main,os_probably_with_irqs_off_removes_slots_0200fe7c,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0200FF04,arm9_main,os_probably_claims_slots_with_irqs_off_0200ff04,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0200FFD8,arm9_main,os_probably_init_clears_the_flag_at_0200ffd8,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -651,7 +651,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x021329EC,arm9_main,libc_wrapper_that_swaps_its_two_arguments_021329ec,libc,,,named,guess,Library entry; identity and signature still need review.
 0x021329F8,arm9_main,subsf3_float_subtract_021329f8,libc,,,named,guess,Library entry; identity and signature still need review.
 0x02132E40,arm9_main,libc_unsigned_64_bit_divide_modulo_helper_02132e40,libc,,,named,guess,Library entry; identity and signature still need review.
-0x02133048,arm9_main,msl_multiply_u64,libc,"a:u64, b:u64",u64,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x02133048,arm9_main,msl_multiply_u64,libc,"a:u64, b:u64",u64,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x02133068,arm9_main,divsi3_idiv32_02133068,libc,,,named,guess,Library entry; identity and signature still need review.
 0x02133274,arm9_main,divsf3_guard_wrapper_02133274,libc,,,named,guess,Library entry; identity and signature still need review.
 0x0213327C,arm9_main,libc_soft_float_divide_helper_normalises_the_0213327c,libc,,,named,guess,Library entry; identity and signature still need review.
@@ -715,7 +715,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x0213A074,arm9_main,libc_strcmp_string_compare_with_word_aligned_0213a074,libc,,,named,guess,Library entry; identity and signature still need review.
 0x0213A1C0,arm9_main,libc_strcat_strcpy_like_appends_the_string_0213a1c0,libc,,,named,guess,Library entry; identity and signature still need review.
 0x0213A228,arm9_main,libc_strncpy_copies_up_to_a3_bytes_0213a228,libc,,,named,guess,Library entry; identity and signature still need review.
-0x0213A434,arm9_main,strlen,libc,s:*const char,u32,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x0213A434,arm9_main,strlen,libc,s:*const char,u32,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x0213A550,arm9_main,libc_large_text_to_double_strtod_like_0213a550,libc,,,named,guess,Library entry; identity and signature still need review.
 0x0213BFA4,arm9_main,libc_strtol_style_32_bit_integer_parse_0213bfa4,libc,,,named,guess,Library entry; identity and signature still need review.
 0x0213C560,arm9_main,libc_32_bit_integer_parse_core_996_0213c560,libc,,,named,guess,Library entry; identity and signature still need review.
@@ -909,10 +909,10 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x021479B4,arm9_main,nitrosdk_unnamed_021479b4,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02147CD8,arm9_main,FX_Mod,sdk,"numer:i32, denom:i32",i32,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x02147D30,arm9_main,FX_DivS32,sdk,"numer:i32, denom:i32",i32,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
-0x02147D88,arm9_main,FX_DivAsync,sdk,"numer:fx32, denom:fx32",void,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
-0x02147DC0,arm9_main,FX_GetSqrtResult,sdk,,fx32,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x02147D88,arm9_main,FX_DivAsync,sdk,"numer:fx32, denom:fx32",void,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x02147DC0,arm9_main,FX_GetSqrtResult,sdk,,fx32,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x02147DEC,arm9_main,nitrosdk_math_related_unnamed_02147dec,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02147E28,arm9_main,FX_GetDivResult,sdk,,fx32,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x02147E28,arm9_main,FX_GetDivResult,sdk,,fx32,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x02147E64,arm9_main,nitrosdk_math_related_unnamed_02147e64,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02147E8C,arm9_main,FX_Sqrt,sdk,x:fx32,fx32,typed,likely,API-shaped signature; entry identity remains provisional.
 0x02147EDC,arm9_main,nitrosdk_math_divsqrt_hw_unnamed_02147edc,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -1064,17 +1064,17 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x0214CD94,arm9_main,nitrosdk_os_related_unnamed_0214cd94,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214CE08,arm9_main,nitrosdk_os_related_unnamed_0214ce08,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214CED0,arm9_main,nitrosdk_os_related_unnamed_0214ced0,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214CFE4,arm9_main,MIi_CpuClear16,sdk,"value:u32, dst:*u8, bytes:u32",void,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
-0x0214CFFC,arm9_main,MIi_CpuCopy16,sdk,"src:*const u8, dst:*u8, bytes:u32",void,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x0214CFE4,arm9_main,MIi_CpuClear16,sdk,"value:u32, dst:*u8, bytes:u32",void,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x0214CFFC,arm9_main,MIi_CpuCopy16,sdk,"src:*const u8, dst:*u8, bytes:u32",void,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x0214D018,arm9_main,nitrosdk_nns_related_unnamed_0214d018,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214D02C,arm9_main,MIi_CpuCopy32,sdk,"src:*const u8, dst:*u8, bytes:u32",void,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x0214D044,arm9_main,nitrosdk_unnamed_0214d044,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214D05C,arm9_main,MIi_CpuClearFast,sdk,"value:u32, dst:*u8, bytes:u32",void,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x0214D05C,arm9_main,MIi_CpuClearFast,sdk,"value:u32, dst:*u8, bytes:u32",void,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x0214D0A8,arm9_main,nitrosdk_unnamed_0214d0a8,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214D0FC,arm9_main,nitrosdk_g3_related_unnamed_0214d0fc,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214D118,arm9_main,nitrosdk_unnamed_0214d118,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214D13C,arm9_main,nitrosdk_g3_related_unnamed_0214d13c,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214D168,arm9_main,MI_CpuFill8,sdk,"dst:*u8, value:u8, bytes:u32",void,native,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
+0x0214D168,arm9_main,MI_CpuFill8,sdk,"dst:*u8, value:u8, bytes:u32",void,native-verified,verified,Leaf semantics checked against the supplied ROM; race shadow validation is pending.
 0x0214D1FC,arm9_main,MI_CpuCopy8,sdk,"src:*const u8, dst:*u8, bytes:u32",void,typed,verified,API-shaped signature; entry identity remains provisional.
 0x0214D32C,arm9_main,nitrosdk_nns_related_unnamed_0214d32c,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214D33C,arm9_main,nitrosdk_os_related_unnamed_0214d33c,sdk,,,named,guess,Library entry; identity and signature still need review.

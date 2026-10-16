@@ -75,6 +75,11 @@ pub static VERIFIED: &[Native] = &[
     Native { segment: "arm9_main", entry: 0x0214_cfe4, name: "MIi_CpuClear16", f: sdk::fill16_block }, // [89]
     Native { segment: "arm9_main", entry: 0x0214_d05c, name: "MIi_CpuClearFast", f: sdk::fill_fast_block }, // [74,473]
     Native { segment: "arm9_main", entry: 0x0214_d168, name: "MI_CpuFill8", f: sdk::fill8_block }, // [120]
+    // second race, with memory-like 3D table writes compared
+    Native { segment: "arm9_main", entry: 0x0214_cffc, name: "MIi_CpuCopy16", f: sdk::copy16_block }, // [12,448]
+    Native { segment: "arm9_main", entry: 0x0214_7d88, name: "FX_DivAsync", f: sdk::div_async_block }, // [842,552]
+    Native { segment: "arm9_main", entry: 0x0214_7dc0, name: "FX_GetSqrtResult", f: sdk::sqrt_result_block }, // [168,974]
+    Native { segment: "arm9_main", entry: 0x0214_7e28, name: "FX_GetDivResult", f: sdk::div_result_block }, // [852,381]
 ];
 
 /// What a game or tool installs: [`VERIFIED`], or for diagnostics per `MKDS_NATIVES`: `off` = none (the
