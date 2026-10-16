@@ -7,6 +7,7 @@
 //!   --self-test compare software against software (checks the tool; must be 100%)
 //!   --split-check  check that both screens rebuilt from `render_split` + the software 3D layer equal the
 //!                  software screens exactly (the CPU form of the GPU compositor)
+//!   --gpu-2d       exact GPU split records and screens from raw inputs; reports CPU cost and upload bytes
 //!   --composite    full screens through the GPU compositor: with the software 3D layer (must be exact) and
 //!                  with the GPU 3D layer (gated by --min/--floor)
 //!   --dump-textures DIR  asynchronously dump original RGBA8 textures by stable ID
@@ -41,6 +42,10 @@ fn run() -> Result<(), String> {
         return upscale_pack(&input, &output);
     }
     let dir = PathBuf::from(first);
+    let mut gpu_2d = false;
+    let mut cpu_2d = std::time::Duration::ZERO;
+    let mut raw_2d = std::time::Duration::ZERO;
+    let mut uploaded = 0usize;
     let (mut dump_textures, mut texture_pack) = (None::<PathBuf>, None::<PathBuf>);
     let (mut min, mut floor, mut images, mut self_test, mut dump, mut split_check, mut composite) = (
         99.0f64,
@@ -71,8 +76,14 @@ fn run() -> Result<(), String> {
             "--dump" => dump = true,
             "--split-check" => split_check = true,
             "--composite" => composite = true,
+            "--gpu-2d" => gpu_2d = true,
             _ => return Err(format!("unknown option {a}")),
         }
+    }
+    if gpu_2d {
+        if self_test || split_check || composite { return Err("--gpu-2d is a standalone exact comparison mode".into()); }
+        min = 100.0;
+        floor = 100.0;
     }
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
@@ -104,6 +115,9 @@ fn run() -> Result<(), String> {
     let mut render_time = std::time::Duration::ZERO;
     let mut render_readback_time = std::time::Duration::ZERO;
     let mut compositor = gpu.as_ref().map(|g| Compositor::new(g, 1));
+    if gpu_2d {
+        if let (Some(g), Some(c)) = (&gpu, &mut compositor) { c.prepare_raw(g); }
+    }
     let mut exact_failures = 0usize;
     if let Some(g) = &gpu {
         let info = g.adapter.get_info();
@@ -127,6 +141,33 @@ fn run() -> Result<(), String> {
                 ),
             )
             .map_err(|e| e.to_string())?;
+        }
+        if gpu_2d {
+            let g = gpu.as_ref().ok_or("--gpu-2d requires a GPU; cannot combine with --self-test")?;
+            let c = compositor.as_mut().unwrap();
+            let layer = snap.layer3d();
+            let texture = compose::upload_layer(g, &layer);
+            let start = std::time::Instant::now();
+            let (a, b, a_top) = snap.splits_parallel();
+            cpu_2d += start.elapsed();
+            let (screen_a, screen_b) = (a.compose(Some(&layer)), b.compose(None));
+            let (top, bottom) = if a_top { (screen_a,screen_b) } else { (screen_b,screen_a) };
+            let soft: Vec<_> = top.into_iter().chain(bottom).map(|p| (p & 0xffffff00) | 255).collect();
+            let start = std::time::Instant::now();
+            c.render_raw(g, &snap, &texture);
+            raw_2d += start.elapsed();
+            uploaded += c.uploaded_2d();
+            let records = c.split_differences(g, &a, &b);
+            let actual = g.read_rgba(c.output());
+            let diff = Diff::of(&soft, &actual);
+            let screens: Vec<_> = snap.screens().into_iter().map(|p| p << 8 | 255).collect();
+            let reference = Diff::of(&screens, &actual);
+            let bad = records != 0 || diff.identical != diff.pixels || reference.identical != reference.pixels;
+            failed += bad as usize;
+            sum += diff.percent();
+            if diff.percent() < worst.0 { worst = (diff.percent(), name.clone()); }
+            println!("{name} GPU 2D: {records} record differences, {} split differences, {} screen differences", diff.pixels - diff.identical, reference.pixels - reference.identical);
+            continue;
         }
         if split_check {
             let layer = snap.layer3d();
@@ -233,6 +274,10 @@ fn run() -> Result<(), String> {
         worst.0,
         worst.1
     );
+    if gpu_2d {
+        println!("GPU 2D: {} / {} frames exact (all split records and both screens)", files.len() - failed, files.len());
+        println!("2D CPU before (parallel splits): {:.3} ms/frame; after (raw upload + GPU submission, including composition): {:.3} ms/frame; uploaded {:.1} KiB/frame", cpu_2d.as_secs_f64()*1000.0/files.len() as f64, raw_2d.as_secs_f64()*1000.0/files.len() as f64, uploaded as f64/1024.0/files.len() as f64);
+    }
     if composite {
         println!(
             "compositor with the software 3D layer: {} of {} frames exact",
@@ -245,7 +290,7 @@ fn run() -> Result<(), String> {
             "FAILED: needs average >= {min}% and every frame >= {floor}%"
         ));
     }
-    if !self_test && !composite && !split_check {
+    if !self_test && !composite && !split_check && !gpu_2d {
         println!(
             "Render CPU submission: {:.3} ms/frame; render + GPU completion/readback: {:.3} ms/frame (includes first-use decoding)",
             render_time.as_secs_f64() * 1000.0 / files.len() as f64,

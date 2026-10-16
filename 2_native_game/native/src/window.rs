@@ -2,7 +2,7 @@
 //! its own thread and talks to the window only through [`HostLink`]: it reads the input state and hands over finished
 //! frames; the window owns the event loop, scaling, fullscreen and the mouse-to-touch-screen mapping.
 use crate::gpu::{Compositor, Gpu, Renderer3d};
-use recomp::{gfx2d::Split, machine::RenderSnapshot};
+use recomp::machine::RenderSnapshot;
 use mkds_builder::controls;
 use std::collections::HashMap;
 use std::sync::{
@@ -24,15 +24,12 @@ pub const H: u32 = 384;
 pub enum Frame {
     /// Finished screens from the software renderer: 256 x 384, `0x00RRGGBB`.
     Pixels(Vec<u32>),
-    /// The renderer input plus both engines' 2D work; the window draws the 3D layer and the screens on the GPU.
+    /// Raw renderer input; the window draws both 2D engines, the 3D layer and the screens on the GPU.
     Gpu(Box<GpuFrame>),
 }
 
 pub struct GpuFrame {
     pub snap: RenderSnapshot,
-    pub a: Split,
-    pub b: Split,
-    pub a_top: bool,
 }
 
 #[derive(Default)]
@@ -50,6 +47,7 @@ pub struct HostLink {
     closed: AtomicBool,
     finished: AtomicBool,
     proxy: Mutex<Option<EventLoopProxy<()>>>,
+    gpu_2d_stats: Mutex<(std::time::Duration, u64, usize)>,
 }
 
 impl HostLink {
@@ -60,7 +58,12 @@ impl HostLink {
             closed: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             proxy: Mutex::new(None),
+            gpu_2d_stats: Mutex::new(Default::default()),
         })
+    }
+
+    pub(crate) fn take_2d_stats(&self) -> (std::time::Duration, u64, usize) {
+        std::mem::take(&mut *self.gpu_2d_stats.lock().unwrap())
     }
 
     /// False once the player closed the window.
@@ -304,7 +307,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let frame = self.link.frame.lock().unwrap().take();
                 if let Some(g) = &mut self.gfx {
-                    if let Err(e) = g.draw(frame) {
+                    if let Err(e) = g.draw(frame, &self.link) {
                         self.error = Some(e);
                         self.link.closed.store(true, Ordering::Release);
                         event_loop.exit();
@@ -583,15 +586,10 @@ impl Presenter {
         })
     }
 
-    fn draw(&mut self, frame: Option<Frame>) -> Result<(), String> {
+    fn draw(&mut self, frame: Option<Frame>, link: &HostLink) -> Result<(), String> {
         let frame = match frame {
-            // No compute support: the same frame, finished on the CPU (software 3D layer + the split's own compose).
-            Some(Frame::Gpu(f)) if !self.compute_ok => {
-                let layer = f.snap.layer3d();
-                let (a, b) = (f.a.compose(Some(&layer)), f.b.compose(None));
-                let (top, bottom) = if f.a_top { (a, b) } else { (b, a) };
-                Some(Frame::Pixels(top.into_iter().chain(bottom).map(|p| p >> 8).collect()))
-            }
+            // Adapters without compute keep the complete software renderer.
+            Some(Frame::Gpu(f)) if !self.compute_ok => Some(Frame::Pixels(f.snap.screens())),
             other => other,
         };
         if let Some(Frame::Gpu(f)) = &frame {
@@ -610,7 +608,13 @@ impl Presenter {
             }
             let (renderer, compositor, _) = self.gpu_path.as_mut().unwrap();
             let layer = renderer.render(&self.gpu, &f.snap);
-            compositor.render(&self.gpu, &f.a, &f.b, f.a_top, layer);
+            let start = std::time::Instant::now();
+            compositor.render_raw(&self.gpu, &f.snap, layer);
+            let took = start.elapsed();
+            let mut stats = link.gpu_2d_stats.lock().unwrap();
+            stats.0 += took;
+            stats.1 += 1;
+            stats.2 += compositor.uploaded_2d();
             self.showing_gpu = true;
         }
         if let Some(Frame::Pixels(pixels)) = &frame {

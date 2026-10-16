@@ -149,10 +149,15 @@ impl PacingStats {
         frame: u64,
         audio: Option<(u64, u64, usize)>,
         instr: (u64, u64, u64),
+        link: &window::HostLink,
     ) {
         let wall = self.wall_mark.elapsed();
         if wall < Duration::from_secs(1) {
             return;
+        }
+        let (gpu_2d, gpu_frames, uploaded) = link.take_2d_stats();
+        if gpu_frames != 0 {
+            eprintln!("[stats] GPU 2D upload + compose submission CPU {:.3} ms/frame, {:.1} KiB/frame, {} frames", avg_ms(gpu_2d, gpu_frames), uploaded as f64 / 1024.0 / gpu_frames as f64, gpu_frames);
         }
         let emu = emulated.saturating_sub(self.emulated_mark);
         let (dl, di, dov) = (
@@ -228,11 +233,8 @@ fn spawn_renderer(
     std::thread::spawn(move || {
         for job in job_rx {
             let done = if gpu {
-                // The 2D engines' CPU part; the 3D layer and the final screens are drawn by the window's GPU.
-                let started = Instant::now();
-                let (a, b, a_top) = job.splits_parallel();
-                let took = started.elapsed();
-                Done { frame: window::Frame::Gpu(Box::new(window::GpuFrame { snap: job, a, b, a_top })), took, parts: [Duration::ZERO, took, Duration::ZERO] }
+                // Ownership transfer only: raw inputs are decoded and composed by the window's GPU.
+                Done { frame: window::Frame::Gpu(Box::new(window::GpuFrame { snap: job })), took: Duration::ZERO, parts: [Duration::ZERO; 3] }
             } else {
                 let done = job.screens_profiled();
                 drop(job);
@@ -617,6 +619,7 @@ fn emulate(
                                 session.stats.interpreted_instructions,
                                 session.stats.overlay_instructions,
                             ),
+                            w,
                         );
                     }
                     // Hold emulation to real time. One step can move guest time forward by many
