@@ -46,13 +46,14 @@ struct Args {
     part_bytes: usize,
     game: bool,
     allow_incomplete: bool,
-    /// Optional function names/meanings (the project's own analysis, `name,segment,ea,...,meaning`):
-    /// written as comments above generated functions; ids and code are unchanged.
-    names: Option<PathBuf>,
+    /// Optional function names/meanings (the project's own analysis: the function dictionary
+    /// `dictionary/*.csv`, or the older `name,segment,ea,...,meaning` table), written as comments above
+    /// generated functions; ids and code are unchanged. Repeatable: later tables override earlier ones.
+    names: Vec<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let (mut rom, mut metadata, mut out, mut lockfile, mut names) = (None, None, None, None, None);
+    let (mut rom, mut metadata, mut out, mut lockfile, mut names) = (None, None, None, None, Vec::new());
     let mut recomp = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (mut part_bytes, mut game, mut allow_incomplete) = (DEFAULT_PART_BYTES, true, false);
     let mut it = std::env::args().skip(1);
@@ -64,7 +65,7 @@ fn parse_args() -> Result<Args, String> {
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--recomp" => recomp = PathBuf::from(value("--recomp")?),
             "--lockfile" => lockfile = Some(PathBuf::from(value("--lockfile")?)),
-            "--names" => names = Some(PathBuf::from(value("--names")?)),
+            "--names" => names.push(PathBuf::from(value("--names")?)),
             "--part-bytes" => {
                 part_bytes = value("--part-bytes")?.parse().map_err(|_| "--part-bytes must be a number")?;
                 if part_bytes < 10_000 {
@@ -118,26 +119,35 @@ fn csv_records(text: &str) -> Vec<Vec<String>> {
 }
 
 /// `(segment, entry without the Thumb bit)` -> one comment line, from a names table with the columns
-/// `name`, `segment`, `ea` and (optional) `meaning`. Rows named only `sub_<address>` with no meaning are skipped.
+/// `name`, `segment`, `ea` or `address`, and (optional) `meaning` or `notes`, `args`, `returns` (the function
+/// dictionary's format). Rows without a real name, signature or meaning are skipped.
 fn function_names(text: &str) -> Result<HashMap<(String, u32), String>, String> {
     let rows = csv_records(text);
     let head = rows.first().ok_or("names table is empty")?;
     let col = |n: &str| head.iter().position(|h| h.trim() == n);
-    let (Some(ci), Some(cs), Some(ce)) = (col("name"), col("segment"), col("ea")) else {
-        return Err("names table needs the columns name, segment, ea".into());
+    let (Some(ci), Some(cs), Some(ce)) = (col("name"), col("segment"), col("ea").or(col("address"))) else {
+        return Err("names table needs the columns name, segment, ea (or address)".into());
     };
-    let cm = col("meaning");
+    let cm = col("meaning").or(col("notes"));
+    let (ca, cr) = (col("args"), col("returns"));
     let mut out = HashMap::new();
     for r in rows.iter().skip(1) {
         let get = |i: usize| r.get(i).map(|v| v.trim()).unwrap_or("");
         let Ok(ea) = u32::from_str_radix(get(ce).trim_start_matches("0x").trim_start_matches("0X"), 16) else { continue };
-        let name = get(ci);
+        let generic = get(ci).is_empty() || get(ci).eq_ignore_ascii_case(&format!("sub_{ea:X}"));
+        let mut name = if get(ci).is_empty() { format!("sub_{:X}", ea & !1) } else { get(ci).to_string() };
+        let (args, returns) = (ca.map(get).unwrap_or(""), cr.map(get).unwrap_or(""));
+        if !args.is_empty() || !returns.is_empty() {
+            name = format!("{name}({args})");
+            if !returns.is_empty() && returns != "void" {
+                name = format!("{name} -> {returns}");
+            }
+        }
         let meaning: String = cm.map(get).unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
-        let generic = name.is_empty() || name.eq_ignore_ascii_case(&format!("sub_{ea:X}"));
-        if generic && meaning.is_empty() {
+        if generic && meaning.is_empty() && args.is_empty() && returns.is_empty() {
             continue;
         }
-        let mut line = if meaning.is_empty() { name.to_string() } else { format!("{name}: {meaning}") };
+        let mut line = if meaning.is_empty() { name } else { format!("{name}: {meaning}") };
         if line.chars().count() > 300 {
             line = line.chars().take(297).collect::<String>() + "...";
         }
@@ -548,16 +558,20 @@ fn run() -> Result<ExitCode, String> {
 
     // readable names as comments (ids and code unchanged)
     let mut named = 0usize;
-    if let Some(p) = &args.names {
-        let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read names table {}: {e}", p.display()))?;
-        let names = function_names(&text)?;
+    if !args.names.is_empty() {
+        let mut names = HashMap::new();
+        for p in &args.names {
+            let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read names table {}: {e}", p.display()))?;
+            names.extend(function_names(&text)?);
+        }
         for f in funcs.iter_mut().filter(|f| !f.arm7) {
             if let Some(line) = names.get(&(f.segment.clone(), f.entry & !1)) {
                 f.code = format!("// {line}\n{}", f.code);
                 named += 1;
             }
         }
-        eprintln!("mkds_gen: {named} functions named from {}", p.display());
+        let tables: Vec<String> = args.names.iter().map(|p| p.display().to_string()).collect();
+        eprintln!("mkds_gen: {named} functions named from {}", tables.join(", "));
     }
 
     // balanced parts by emitted source size
@@ -818,5 +832,17 @@ mod tests {
         assert!(!names.contains_key(&("arm9_main".to_string(), 0x0200_0010)), "generic name, no meaning");
         assert_eq!(names[&("arm9_main".to_string(), 0x0200_0020)], "OS_Init", "Thumb bit ignored");
         assert!(function_names("a,b\n1,2\n").is_err());
+    }
+
+    #[test]
+    fn dictionary_rows_give_signature_and_notes() {
+        let csv = "address,segment,size,name,kind,area,args,returns,status,confidence,notes\n\
+                   0x02000000,arm9_main,4,,game,,,,described,guess,clears a flag\n\
+                   0x02000010,arm9_main,4,FX_Div,sdk,,\"a:fx32, b:fx32\",fx32,native,likely,\n\
+                   0x02000020,arm9_main,4,,game,,,,unknown,,\n";
+        let names = function_names(csv).unwrap();
+        assert_eq!(names[&("arm9_main".to_string(), 0x0200_0000)], "sub_2000000: clears a flag");
+        assert_eq!(names[&("arm9_main".to_string(), 0x0200_0010)], "FX_Div(a:fx32, b:fx32) -> fx32");
+        assert!(!names.contains_key(&("arm9_main".to_string(), 0x0200_0020)));
     }
 }

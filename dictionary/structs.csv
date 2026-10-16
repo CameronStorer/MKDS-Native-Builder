@@ -1,0 +1,130 @@
+name,aliases,parent,root,size,recognize,description
+Kart,KartObject;racer;kart;KartRaw;KartPose;KartMotion;KartBody;KartDamage;KartDrift;KartView;KartSense;KartShrink;KartSlipstream;KartSteering;KartSurface;SpeedLimit;WallState;MiniTurbo;Boost;EngineInput;KartInfo,,*0x0217ACF8,0x5A8,a1 in functions indexing the controller array by player number: 92 * *(a1 + 120) (tools/struct_map.py seed); sub_207A974 returns the kart of a slot (0x5A8 bytes each from *0x0217ACF8),"one racer: physics, flags +0x44/+0x48/+0x4C, yaw +0x236, items, effects. Hand-port types KartPose/KartMotion/... are views of this one object (aliases)"
+KartP2CC,KartRawAt2CC,,,,*(kart+0x2CC),struct the kart points to at +0x2CC (recovered layout only; name it when known)
+KartP514,KartRawAt514,,,,*(kart+0x514),struct the kart points to at +0x514 (recovered layout only)
+KartP590,KartRawAt590,,,,*(kart+0x590),struct the kart points to at +0x590
+KartP9C,KartRawAt9C,,,,*(kart+0x9C),struct the kart points to at +0x9C
+KartP12C,KartRawAt12C,,,,*(kart+0x12C),struct the kart points to at +0x12C
+KartP168,KartRawAt168,,,,*(kart+0x168),struct the kart points to at +0x168
+KartP508,KartRawAt508,,,,*(kart+0x508),struct the kart points to at +0x508
+KartStats,stats,,,,pointer held by the kart; per character/kart combination constants,"kart stats (speed, weight, surface speeds +0x78.., collision radius)"
+KartController,controller,,,92,92-byte entries indexed by kart +120 (player number),per player input/controller state
+RaceManager,race;racemgr,,*0x021755FC,,global pointer *0x021755FC,"race-wide state: +24 timer, +0x47C race RNG (MATH_Rand32 state), +0x498 second RNG (Boos, winner alternation)"
+RaceConfig,config;race_settings,,*0x021759A0,,global pointer *0x021759A0,"race setup: +0 course id, +20 CPU item-handler class, +47 mission kind, +55 limit, +60 target ids, +72 mission name ""mrNN"""
+ScoreManager,scores,,*0x0217B1DC,,global pointer *0x0217B1DC,"per-racer score records (ScoreRecord, 112 bytes); race table +976 = racer count"
+ScoreRecord,BalloonMaker,ScoreManager,,112,112-byte records in ScoreManager,"+8 state (0 alive), +76 balloons up, +80 balloons spare"
+MapObj,MapObject;object;MovingSolid;MovingTerrain;TerrainCylinder;Collider,,,,"a1 of functions in the map-object handler table 0x0216B94C / own-reaction table 0x0216B9AC; class records [kart_cb, item_cb, shape, r, h, d, ...]","course object (NKM OBJI instance) common header: +4 position, +16 velocity, +40/+52/+64 axes (rows), +0x80 state (pending, applied next tick), +160/+172/+184 previous axes, +0xF4 collision centre, +0x100.. half extents / radius, +0x110 side attr, +0x114 caps attr, +0x124 angular velocity, +0x134 collision shape (0 box, 1 cylinder). Each class below extends it: their fields are past the header or reuse its spare words"
+WaterObj,water;Water;Tide,MapObj,*0x0217B4C4,,global pointer *0x0217B4C4 (constructors sub_20D99F8..sub_20D9C54 via sub_20D9CF4; tick sub_20D9F8C),"the course water: +0x170 active (karts wade: Cheep Cheep Beach, Palm Shore); height also at **0x0217B4B8"
+Turner,TurningPlatform,MapObj,,,"objects 0xCB/0xCE/0xD0/0xD1 (sub_20E3EF4, type table 0x02158D5C)","turning platforms (gears, rotary room, rotating pipe)"
+Piranha,PiranhaShot,MapObj,,,NKM object id (see the hand port),piranha plant and its shot
+Boo,BooSpawner,MapObj,,,Boos (Luigi's Mansion),
+Bat,BatSpawner,MapObj,,,bats,
+Chomp,ChainChomp;PathChomp,MapObj,,,chain chomps,
+MapObjMisc,Bakubaku;Bullet;BulletLauncher;CheepCheep;Crab;Drum;Flipper;Goomba;Hatch;IronBall;MontyMole;PathSlider;Pendulum;Pokey;Rock;Snowman;Thwomp;Vehicle;Knock;ClockHand;FireRing;Block;Shine,MapObj,,,one row per class wanted: split this alias list into its own STRUCTS rows (parent MapObj) as each class is mapped,map-object classes not yet given their own registry row (their MAPPING rows keep the class name)
+Item,ItemObject;ContactItem;HeldItem,,,,"item objects (shells, bananas, bombs...), type table ItemTypeTable",item object common layout
+Shell,RedShell;ShellKind;ItemObjectRed;ItemObjectGreen,Item,,,green/red shell item objects,
+BlueShell,BlueRacer;BlueTarget;BlueField;BlueWorld;ItemObjectBlue,Item,,,blue shell item object,
+Banana,ItemObjectBanana,Item,,,banana item object,
+Bomb,ItemObjectBomb,Item,,,bob-omb item object,
+Mushroom,,Item,,,mushroom item use,
+ItemTypeTable,item_types,,*0x0217BC14,168,global pointer *0x0217BC14; 168 bytes per item type,per item type constants (+68 handler)
+Camera,RaceCamera;PlayerView;camera,,,,race camera,"race camera (axes +0x120 right, +0x12C up, +0x138 forward of the kart it follows)"
+ObjectSortList,near_objects,,*0x0217B598,28,"global pointer *0x0217B598; 28-byte entries, object at +24","sorted master object array (sub_20D5180 builds the near list, <=128)"
+PadState,CommonPadState,,*0x02175604,,sub_2043A34 writes held keys at+2; sub_2043A20 reads+2,Common hardware button-scan state; complete size/layout unknown; distinct from92-byte controller slots
+PiranhaShot,,MapObj,,,object 0x1AB; tick sub_209905C r1,path-following projectile; distinct from plant 0x1AA
+Crab,,MapObj,,,object 0x1AC; tick sub_209A7DC r1,walking crab with body/claw clocks and knock/rise states
+SplParticle,,,,,nodes traversed from emitter+8 or +20,primary/child particle node; lifetime+36 and age+38
+SplEmitter,,,,,PiranhaShot+208 points to this emitter,separate primary/child lists and flags+36
+CourseCameraSet,CourseCameras,,0x02175600,,"course camera data object: chain of 76-byte camera records (type at +62), goal camera +204, intro camera +212 (offsets as in agent_03 notes)",docs/function_notes/agent_03.md lines 285-293; analysis/xref.json leads +0x7C/+0xCC
+FriendCodeState,,,0x0217A9E0,,"friend-code state: own friend code at +76 converted by sub_2061220 (guess: the same root also carries state-block fields +4/+130/+139 per agent_00 notes, not yet reconciled)",docs/function_notes/agent_03.md:85; docs/function_notes/agent_00.md:91
+ShineObject,PoppedBalloon;Shine,,pool 106 (class table 0x0216B268),236,"pool-106 object: state at +224 in 0..6, position +4, velocity +16",dropped/popped balloon and Shine Sprite object; see MAPPING rows ShineObject
+ShineSpot,,,pool 107,,"pool-107 object built from NKM OBJI id 0x6B (+4 position, +160 active)",Shine Runners spawn spot
+STAG,CourseStage,CourseData,*0x02175600 +24,,NKM STAG record (course data +24 points at it),"per-course stage info: +0 course id, +2 laps or battle match seconds"
+RaceConfig,SNGAME;config,,*0x021759A0,,"race configuration object: +8 mode, +24 battle type, +976 racer count",race/battle/mission setup shared by all modes
+FriendCodeEntryScreen,,,0x0217D3E0,,"friend-code entry (WFC add-friend) screen manager: state +0x10, result code +0x72",docs/function_notes/agent_08.md
+RaceHistory,CupResults,,0x0217B468,,"race history array and cup-end data (rank, points, per-race results); table at +0x10C",docs/function_notes/agent_02.md sub_2045874/sub_2045BD4; agent_03.md sub_2078078
+CourseMapView,MapView,,0x0217B3A0,,"course map/minimap view state (scroll, zoom, viewed kart map position)",sub_20B503C/sub_20B5290/sub_20B5658/sub_20B57F8 meanings
+OverlayMessageState,,,0x0217B3D4,,"message overlay state: slide-out eased value at +0xE0, clear at +0xDC",sub_20C5DD8/sub_20C5E30/sub_20C5DF0/sub_20C5EB8 meanings
+CharacterDisplay,,,0x0217B1E0,,"character display object (Toad T_kino): model, angle bounce tick, render",sub_20A269C/sub_20A2558/sub_20A23CC/sub_20A29CC meanings
+ResultsScreen,,,0x02174E40,,results / battle-victory screen object: init and countdown,sub_2032F94/sub_2032AC4 meanings
+ItemObjectBanana,banana;fake_box;DroppedItem,ItemObject,,308 (banana) / 324 (fake box),item type 2 or 7,"dropped/thrown banana and fake item box (same flight code, own type constants)"
+ItemObjectRed,red_shell,ItemObject,,628,item type 1,red shell: route state machine at +0x23C
+ItemObjectBlue,blue_shell;spiny,ItemObject,,796,item type 5,"blue shell: route, target search, homing, spiral, rise, dive, blast"
+ItemObjectBomb,bob-omb,ItemObject,,420,item type 9,bob-omb (partial map)
+ItemObjectBoo,boo_item,ItemObject,,628,item type 11,Boo item object (partial map)
+ItemObjectBlooper,blooper_item,ItemObject,,436,item type 10,Blooper item object (partial map)
+ItemTypeEntry,item_type_record,ItemTypeTable,,168,one 168-byte entry of *0x0217BC14 (templates 0x02159934..),"per item type: object size, callbacks (+0x18 construct, +0x24 release, +0x28 update), radius bases, sizes, wobble"
+ItemSlot,item_record;SlotRecord,Kart,*0x027E00C8,528,record + 508 = kart object; +496 route node,"per kart item slot (528 bytes at 0x027E00C8 + 528*kart): held items +0x14, count +0x20, hand request +0x58, input flags +0x1EC, route node +0x1F0"
+RaceInfo,race_struct,,*0x021755FC,,"+976 racers, +1140 place table, +1148 RNG, +1228 battle flag","race-wide table the item code reads (places, RNG state, battle flag)"
+MissionRecord,mission_record;<rom string> row,,data/Scene/Menu/<rom string> + 8 + 44*i,44,"record in the NKMR file (magic NKMR, count 91 at +4); embedded at RaceConfig+40 during a mission; its +0x20 holds ""mrNN""","one mission: kind (+7), course id (+8), limit (+0x0F), target object ids (+0x14), number (+6), name (+0x20); +0..+5 are three unexplained u16 (rank thresholds, guess)"
+MissionState,mission_clock;mission_record_heap,,*0x021A9B70,0x28+,heap object whose +4 u16 is the mission count; tests in sub_2181A80 / sub_2181840 / sub_218153C read +4/+6/+8/+10/+12/+14,"mission progress counter, step request queues and callbacks (kinds 1 and 5 use the queues)"
+RacerManager,score_manager;racer_records,,*0x0217B1DC,960,allocated by sub_20A0E00 (960 bytes = 8 x 112 + tail); +948 is -1 until someone finished,battle / mission per-racer records and the winner latch
+RacerRecord,,RacerManager,*0x0217B1DC + 112*i,112,"record i of the racer manager: +68 / +72 hold i, +24 / +28 are -2 while unset","one racer in battle / mission: state, rank slots, counter, score"
+MissionTarget,mission_enemy;boss_object,,heap objects with u16 id 0x1F5..0x1FE,0x30C,"*(u16*)obj in 0x1F5..0x1FE, +160 points at a kind definition, +0x150 is the behaviour state 0..8","mission enemy / boss object (overlay 1 definitions at 0x021A78xx): position, state machine, heading controller, velocity, callbacks"
+MissionTargetDef,prm;kind_definition,,*(MissionTarget+160) = data/MissionRun/<name>.prm,77..180 words,the whole .prm file read as little-endian words (boss_donketu.prm = 145 words),"per-kind tuning: hits to defeat, friction, gravity, animation ids and speeds of each state, knock and push values"
+MissionGate,,,"object id 0x6E (def 0x021A79C4, size 0xCC)",0xCC,"map object id 0x6E; +172 state 0/1/2, settings[0] = gate number","numbered gate of a gate mission: closed until count >= number - 1, opening animation on touch"
+SDAT,SoundArchive;SDATFat;SDATInfo;SeqInfo;BankInfo;SeqArcInfo;WaveArcInfo,,sound_data.sdat file,,"magic SDAT; +0x18 INFO offset, +0x20 FAT offset","Nitro sound archive: sequences, sequence archives (SE sets), banks, wave archives"
+CharacterSelection,SelectionStruct,,heap (sub_203BEDC),72,"72-byte struct: lock masks +0/+1, character[8] +4, kart[8] +0x24, unlock table +68",kart/character selection for 8 slots
+RaceResults,RaceTimer,,*0x021755FC,,object holding 140-byte racer records at +20 and the race RNG at +1148,race results/timers and RNG
+FriendRecord,FriendList,FriendCodeState,60 records,,20-byte name + packed date; 60 slots,friend list entries
+ObjectKindList,object_manager;kind_list,,*off_20D3B6C (global),,"a1 of sub_20D4C28: count u16 at +4, per-instance callback +16, instance pointer array +36","per-kind list of live course-object instances; the manager runs a callback over active instances (flags & 0x12 == 0 and +102 != 0), optionally sorted by +120"
+ObjClassRecord,obj_class;class_record,,,,pointer at MapObj +152; shape at +8,per-object-kind class record: kart/item callbacks and collision shape
+StateMachine,sm;state_table,,,20,"inline in a map object; initialised by sub_2046BE8(sm,table,count,owner)","per-object (enter,update) state table with a pending request applied next tick"
+NkmObji,OBJI,,,0x3C,"NKM section OBJI, 0x3C-byte records","course object instance placement: position, rotation, scale, id, route, 4 settings"
+NkmPoit,POIT,,,0x14,"NKM section POIT, 0x14-byte records",path point: position + 4 s16 settings (setting 1 = speed multiplier)
+NkmPath,PATH,,,4,"NKM section PATH, 4-byte records","path header: loop flag (+1), point count (+2)"
+NkmEpoi,EPOI,,,0x18,NKM section EPOI,"CPU route point (position, radius, drift hint)"
+NkmIpoi,IPOI,,,0x14,NKM section IPOI,item (red shell) route point
+NkmKtps,KTPS,,,0x1C,NKM section KTPS,kart start position + rotation
+NkmCpoi,CPOI,,,0x24,NKM section CPOI,checkpoint line with next/prev/key/respawn/flags
+KclHeader,KCL,,,0x38,start of a <rom string> file,"collision file header: array offsets, thickness, bounds, octree shifts"
+KclPrism,prism,,,0x10,KCL prism array entries,"one collision triangle prism: height, vertex/normal indices, attribute"
+KclSphereQuery,sphere_query,,,,sub_1FFDEE4 argument list and outputs,swept-sphere course collision query inputs/outputs
+SplManager,spl_manager,,,76,constructor sub_2018D94,"particle (SPL) manager: free-lists, 156-byte emitter slots, 68-byte particle slots"
+OSMessageQueue,msgq,,,32,sub_200EB90 init,"NitroSDK message queue: send/recv thread queues, ring buffer"
+OSMutex,mutex,,,16,sub_200EDC0 init,NitroSDK mutex
+OSContext,thread_context,,,72,sub_200E688 init,saved CPU register block of a thread
+OSThread,thread,,,,sub_200E28C creates,"NitroSDK thread control block (context first, priority +112, stack bounds +144/+148)"
+FSFile,file_handle,,,92,sub_2004238 zeroes 92 bytes,NitroSDK file handle (FS_OpenFile etc.)
+FSArchive,archive,,,,"sub_2004018 attaches, sub_2004128 registers","NitroSDK archive (the ""rom"" archive uses card read callbacks)"
+ItemRecord,ItemSlot;ItemRequest,,*0x027E00C8,0x210,"table of 8 records, 528 bytes each, from *0x027E00C8 (0x023788E4 in a race); a1 in sub_20F0154 / sub_20EFC74 / sub_20F47E4 (record + 0x58 is the ItemHand)","per-kart item state: held item id, hand (held objects), button flags, route node, kart pointer"
+ItemHand,,,ItemRecord+0x58,0x1B8,a1 in sub_20EE528 / sub_20EECDC / sub_20EE748 / sub_20EF4A0 / sub_20EF65C / sub_20EF9A8 / sub_20EFA60 (offsets relative to the hand),"what a kart holds: up to three item objects hung behind it or orbiting it, with the spring state"
+ItemStateMachine,StateMachine,,,,a1 + 388 (bob-omb) / + 744 (blue shell) / + 0x23C (red) passed to sub_2046B40,"small per-item state machine: table pointer, ticks in state, state, requested state"
+BroadphaseEntry,,,*0x0217B598,28,28-byte entries counted by *0x0217B590,"item/kart broadphase: position pointer, half size, flags (0x4000 = item object)"
+NetSession,net_session;wireless_session;MPSession,,*0x0217D364,>= 0x1F56,"mode word at +0x1950, slot count +0x1F53, active-slot mask +0x1F55","wireless/online multiplayer session block: session mode and phase words, frame gate, slot/event records (68-byte slots), active-slot mask (guess: the session manager of local wireless and Wi-Fi play)"
+CourseSelectScreen,course_menu_screen,,*0x0217D348,,state +0x30 / next +0x34 / counter +0x38,"course-select / map-grid menu screen controller (cell tables, touch input, group counters)"
+MenuAnimScreenD330,menu_screen_d330,,*0x0217D330,,state +0x54 / next +0x58 / counter +0x5C,"menu screen of animated sub-screens (13 sub-states, eased cell writes, friend-count dependent redraws)"
+MenuAnimScreenD328,menu_screen_d328,,*0x0217D328,,state +0x4C / next +0x50 / counter +0x54,"menu screen of animated sub-screens (sibling of 0x0217D330, 10 states)"
+MenuSelectScreen,selection_screen,,*0x02174E38,,"sub-state +0x70, selected +0x74, screen state +0x94","selection / prompt screens drawn with radio-style highlights (8 cells), touch input and BMG messages"
+OptionScreen2,option_screen_2,,*0x021A9BB8,148,selection +0x78 wraps 0..7; 148-byte state allocated by sub_2194710,"second Option screen: sub-states 0..6 slide panels in/out over 10 frames, selection of 8 entries"
+MessageMenuScreen,message_menu_screen,,*0x021A9BBC,,"state +0x50 (0..0x11), counter +0x58",message/menu state machine with eased cell animations (18 states)
+RaceScreenState,race_screen_2d;RaceHudScreen,,*0x0217B330,>= 2336,"mode +0x828 (3,5,6)","2D race/game screen state object heap-allocated by sub_20B03BC (zeroes +2060..+2332): modes 3, 5, 6 switch the draw/update chains"
+RecordSelectScreen,record_select_screen,,*0x021CA3F4,,"state +0x64 (0..8), counter +0x68, cursor +0x9E","grid/record selection screen (yes/no choices, info panel for the selected record, random cell offsets in state 8)"
+NNSModel,MDL0;NNSMaterialBlock;NNSMaterial;NNSShape;NNSInverseBind,,.nsbmd BMD0/MDL0 block,,"model block: +4 SBC, +8 materials, +0x0C shapes, +0x10 inverse bind, +0x1C pos scale, +0x40 node dict",Nitro 3D model as the NNS G3D runtime sees it
+JointAnimation,NodePose;JCA;NSBCA,,.nsbca BCA0/JNT0,,"flags, num_frames, tracks by node index; fx12 poses",joint animation clips
+PatternAnimation,NSBTP;BTP0;PAT0,,.nsbtp,,texture/palette pattern track per material name,"texture pattern animation (face expressions, crab claws)"
+SPA,SpaArchive;SpaEmitter,,.spa particle resource,,"signature APS12_1, +8 emitter count, +24 texture section, 88-byte emitter base + optional blocks",SPL particle resource
+ObjModel,ModelWrapper,MapObj,object +? model helper,,"+12 sprite helper, +16 joint/pattern helper",per-object model/animation wrapper used by sub_209B634/sub_209B688
+EngineSound,KartEngineState,,Kart+0x450,0x6C,(kart + 0x450) in sub_2024A88 / sub_20719D0 and the callbacks sub_202506C / sub_2025030 / sub_2024FC0 / sub_2024FE8,"per-kart engine voice state: SE id, volume, smoothed pitch, ramp, class coefficients, ids"
+SoundEmitter,Emitter,,embedded in Kart and item/map objects,,arguments to sub_21090C4 / sub_2109078 / sub_2109110; the type byte at +0x3C and the position pointer at +0x28,"a sound source: type (volume record), position pointer, flags, voice handle, voice callback"
+NetRaceSync,net_race;race_net_sync,,*0x0217A9F4,>= 0x760,"phase +0x758, active-slot mask +0x749","wireless/Wi-Fi race synchronisation block: race-sync phase, 4 x 136-byte remote-slot records, 16 queued messages, per-slot status table"
+CharacterSelectScreen,select_screen,,*0x02174DF4,,"state +0x6C (0..9), cell table +0x28","character/course select screen object: 9-12 entry slot layouts, highlight flags"
+InfoMessageScreen,staff_roll_screen,,*0x021A9BC8,144,phase +0x04 (0..5),info-message / staff-roll results screen (144-byte object from sub_2199620)
+LobbyScreen,slot_hud_screen,,*0x02174E08,0x3A0 init,"state +0xAC (0..7, 60-frame timers)",2D screen with 4 slot icons and a countdown timer HUD (guess: multiplayer lobby/results)
+RaceHudResources,hud_resources,,*0x0217B3A4,>= 0x880,tables +0x5FC/+0x6AC/+0x74C/+0x7D0,race HUD graphics resource block allocated by sub_20B8624
+WfcMessageManager,wfc_message_manager,,*0x021B5488,,state +0x24,"online (Wi-Fi) message/result manager: state, result rows (guess)"
+ChoiceMessageScreen,choice_screen,,*0x021A9BD4,,"state +0x48 (0..7), counter +0x50","message / choice screen (slide-in, press animation) returning 1/2 on confirm/cancel"
+TitleMenuScreen,title_screen,,*0x0217B320,,state +0x54,2D title/menu screen (sub_20AD344 init) with a state history record and a 17-entry cell list
+MainMenuScreen,main_menu_screen,,*0x0217D340,140,state +0x30 / next +0x34 / counter +0x38,"main menu screen (140-byte object from sub_2117E24): 12 states, grid layout, selected entry +0x44"
+ResultsRankScreen,results_rank_screen,,*0x0217D344,112,state +0x34 / next +0x38 / counter +0x3C,results / ranking screen (112-byte object from sub_2119770): 9 states
+KillerItemBlock,EffectBlock,,Kart+0x538,,"kart + 1336 in sub_20695C4 / sub_206938C (block + 30 tick, + 44 driver)","per-kart Bullet Bill state (tick, end flag, end rank) and the autopilot driver; +28 is the Blooper ink timer"
+ItemKindTable,ItemTable,,*0x0217BC28,28,"28-byte entries, 18 of them, built by sub_20F4B8C","one entry per roulette item (0..17): object type, count, hold flag, class, use callback"
+BlooperActor,Gesso,Item,,,"item object type 10 (record 0x0215A308): reset 0x021031AC, enter sub_2102E8C, update sub_210298C, draw sub_21027AC","the Blooper screen actor: victim selection at age 63, ink at 143, life 193"
+BooActor,Teresa,Item,,,"item object type 11 (record 0x0215A244): init sub_21025D8, enter sub_2101D18, update sub_2101C84","the Boo item actor: picks a victim, flies out and back, steals and delivers an item"
+WaterTide,water_tide;WaterObject,WaterObj,*0x0217B658,>= 0x174,"height +4, phase +0x2C, state +0x24, active +0x170","the course water/tide object as the constructors sub_20D99F8..sub_20D9C54 build it through sub_20D9CF4 (global 0x0217B658; sub_20D3D48 reads it through 0x0217B4C4: same object, two globals - guess), ticked by sub_20D9F8C"
+RouteNode,RouteCursorNode;ItemNode;CpuNode,,CourseData+0xAC / +0xA0,40,"ptr<RouteNode> fields (route_node, target_node, reached_node, recovery_target); `cpu_nodes + 40 * i`","runtime route graph node: up to 3 next, 3 prev links, source point, radius, link counts"
+KTPJ,RespawnPoint,,CourseData+0x24,32,32-byte respawn records selected by CourseData +0xF8,"respawn point: position, direction, nearest CPU/item route node indices"
+ObjectKind,object_kind;kind_record,ObjectKindList,,,"record with count u16 at +4, pre +12, callback +16, post +20","one map-object kind record in the object manager (array at manager +308, count u16 +372): instance arrays, per-kind update/draw callbacks"
+MapObjInstance,mapobj_instance,,,,"flags u16 at +2, fade counter +102","one live map-object instance walked by the manager: flags (+2 bit 4 skip update, 0x12 skip draw), position/displacement +4..+16, fade counter +102, priority +120, children +148"
+ItemPool,ItemTypePool,,,64,a1 in sub_20F02C0 / sub_20F1048 / sub_20F0F70 (one pool per item type),"pool of preallocated item objects of one type: pointer array, capacity, in-use cursor, live count, limits"
+ControllerSlot,controller_slot;PadSlot,,"0x02175608 (8 racer slots + UI slot, 92 bytes each)",92,"held u16 at +2, source type +0x3C","per-player controller slot: pressed/held/released keys, auto-repeat state machine, soft-reset detector, input source type, enabled-button mask, touch block"

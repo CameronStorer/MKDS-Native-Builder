@@ -402,9 +402,10 @@ pub fn recompile(
         .arg("--no-game") // the builder writes the game crate: it must link the native host
         .arg("--allow-incomplete") // coverage is judged below so rejects can be reported
         .current_dir(&opts.source);
-    let names = opts.source.join("4_docs/FUNCTION_TABLE.csv");
-    if names.is_file() {
-        gen_cmd.arg("--names").arg(&names); // comments only: readable function names in source/
+    // comments only: readable function names, signatures and notes in source/ from the function
+    // dictionary (`dictionary/functions.csv`, then the hand-made tables that refine it)
+    for names in dictionary_tables(&opts.source) {
+        gen_cmd.arg("--names").arg(&names);
     }
     let out = gen_cmd.output()?;
     for l in String::from_utf8_lossy(&out.stderr)
@@ -591,7 +592,7 @@ pub fn recompile(
         "runtime_reads_rom": false,
         "arm7": if has_arm7 { "lifted" } else { "interpreted (generator produced no LIFTED7)" },
         "interpreter_compiled_in": opts.with_interpreter,
-        "readable_names": names.is_file(),
+        "readable_names": !dictionary_tables(&opts.source).is_empty(),
         "executable_sha256": sha256_file(&exe)?,
         "metadata_sha256": sha256_file(&metadata)?,
         "cargo_lock_sha256": sha256_file(&ws.join("Cargo.lock"))?,
@@ -881,9 +882,46 @@ fn launch_command(bundle: &Path, m: &serde_json::Value, exe: &str, rom: &str, ex
     command
 }
 
+/// The function dictionary's tables in `source`, in override order: `dictionary/functions.csv` (exported
+/// from the mapping work), then the other `dictionary/*.csv` tables (hand-refined: SDK, game systems) by
+/// name. Falls back to the mapping project's `4_docs/FUNCTION_TABLE.csv` in a checkout without a dictionary.
+fn dictionary_tables(source: &Path) -> Vec<PathBuf> {
+    let dir = source.join("dictionary");
+    let base = dir.join("functions.csv");
+    let mut refined: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "csv") && *p != base && !p.ends_with("structs.csv"))
+        .collect();
+    refined.sort();
+    let mut tables: Vec<PathBuf> = [base].into_iter().filter(|p| p.is_file()).chain(refined).collect();
+    let legacy = source.join("4_docs/FUNCTION_TABLE.csv");
+    if tables.is_empty() && legacy.is_file() {
+        tables.push(legacy);
+    }
+    tables
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dictionary_tables_come_in_override_order() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(dictionary_tables(d.path()).is_empty());
+        std::fs::create_dir_all(d.path().join("4_docs")).unwrap();
+        std::fs::write(d.path().join("4_docs/FUNCTION_TABLE.csv"), "").unwrap();
+        assert_eq!(dictionary_tables(d.path()), [d.path().join("4_docs/FUNCTION_TABLE.csv")]);
+        let dict = d.path().join("dictionary");
+        std::fs::create_dir(&dict).unwrap();
+        for f in ["sdk_functions.csv", "functions.csv", "game_karts.csv", "structs.csv", "export.py"] {
+            std::fs::write(dict.join(f), "").unwrap();
+        }
+        let names: Vec<_> = dictionary_tables(d.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["functions.csv", "game_karts.csv", "sdk_functions.csv"]);
+    }
 
     #[cfg(unix)]
     #[test]

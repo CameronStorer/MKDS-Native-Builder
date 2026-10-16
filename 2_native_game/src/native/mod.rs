@@ -44,9 +44,22 @@ pub fn ret(c: &Cpu) -> u32 {
     crate::arm::interwork(c.r[14])
 }
 
-/// Every native function, in no particular order. Empty until functions pass the shadow checker;
-/// the builder installs the ones the dictionary marks `native-verified`.
+/// Every native function (on trial until it passes the shadow checker), in no particular order.
 pub static NATIVE: &[Native] = &[];
+
+/// The natives that passed the shadow checker over whole recorded races (`native-verified` in the
+/// dictionary): what the game installs.
+pub static VERIFIED: &[Native] = &[];
+
+/// What a game or tool installs: [`VERIFIED`], or for diagnostics per `MKDS_NATIVES`: `off` = none (the
+/// exact translation everywhere), `all` = every [`NATIVE`] including those on trial.
+pub fn selected() -> &'static [Native] {
+    match std::env::var("MKDS_NATIVES").as_deref() {
+        Ok("off") => &[],
+        Ok("all") => NATIVE,
+        _ => VERIFIED,
+    }
+}
 
 #[cfg(test)]
 mod tests {

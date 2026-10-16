@@ -367,6 +367,7 @@ fn emulate(
         .filter(|s| *s == "arm9_main" || *s == "bios9" || s.starts_with("arm9_autoload"))
         .collect();
     let dispatcher = Dispatcher::with_loaded(table, &resident);
+    dispatcher.set_natives(recomp::native::selected());
     let mut session = Session::new(rom, image, &dispatcher)?;
     // Headless `--stats` prints a per-stage cost profile; the clock is only read when asked for.
     session.machine.profile_time = options.headless && options.stats;

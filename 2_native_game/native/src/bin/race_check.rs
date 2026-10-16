@@ -88,6 +88,7 @@ pub fn run_with_tables(
         .filter(|s| !recomp::residency::is_overlay(s))
         .collect();
     let dispatcher = Dispatcher::with_loaded(table, &fixed);
+    dispatcher.set_natives(recomp::native::selected());
     let mut session = Session::new(&rom, &image, &dispatcher)?;
     if !table7.is_empty() {
         session
