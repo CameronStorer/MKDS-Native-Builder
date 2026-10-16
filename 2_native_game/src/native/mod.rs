@@ -44,9 +44,25 @@ pub fn ret(c: &Cpu) -> u32 {
     crate::arm::interwork(c.r[14])
 }
 
-/// Every native function, in no particular order. Empty until functions pass the shadow checker;
-/// the builder installs the ones the dictionary marks `native-verified`.
-pub static NATIVE: &[Native] = &[];
+/// Differential-tested leaf candidates. The builder installs only entries that later pass
+/// the recorded-race shadow check and are marked `native-verified` in the dictionary.
+mod sdk;
+
+pub static NATIVE: &[Native] = &[
+    Native { segment: "arm9_main", entry: 0x0200_fe74, name: "MATH_CountLeadingZeros", f: sdk::count_leading_zeros_block },
+    Native { segment: "arm9_main", entry: 0x0213_3048, name: "msl_multiply_u64", f: sdk::multiply64_block },
+    Native { segment: "arm9_main", entry: 0x0213_a434, name: "strlen", f: sdk::strlen_block },
+    Native { segment: "arm9_main", entry: 0x0214_cfe4, name: "MIi_CpuClear16", f: sdk::fill16_block },
+    Native { segment: "arm9_main", entry: 0x0214_cffc, name: "MIi_CpuCopy16", f: sdk::copy16_block },
+    Native { segment: "arm9_main", entry: 0x0214_d02c, name: "MIi_CpuCopy32", f: sdk::copy32_block },
+    Native { segment: "arm9_main", entry: 0x0214_d05c, name: "MIi_CpuClearFast", f: sdk::fill_fast_block },
+    Native { segment: "arm9_main", entry: 0x0214_d168, name: "MI_CpuFill8", f: sdk::fill8_block },
+    Native { segment: "arm9_main", entry: 0x0214_7cd8, name: "FX_Mod", f: sdk::remainder_block },
+    Native { segment: "arm9_main", entry: 0x0214_7d30, name: "FX_DivS32", f: sdk::divide_block },
+    Native { segment: "arm9_main", entry: 0x0214_7d88, name: "FX_DivAsync", f: sdk::div_async_block },
+    Native { segment: "arm9_main", entry: 0x0214_7dc0, name: "FX_GetSqrtResult", f: sdk::sqrt_result_block },
+    Native { segment: "arm9_main", entry: 0x0214_7e28, name: "FX_GetDivResult", f: sdk::div_result_block },
+];
 
 #[cfg(test)]
 mod tests {
