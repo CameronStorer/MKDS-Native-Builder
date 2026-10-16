@@ -110,9 +110,12 @@ Alongside it:
 ## Status
 | Item | State |
 |---|---|
-| Plan, branch `block3`, corpus at `builds/corpus` | done 2026-10-16 |
-| A. GPU 2D | Codex running |
-| B1. Exporter, format, builder hook-up, argument analysis | agent-lift in progress |
-| B2. SDK pass | Codex running |
-| B4. Shadow checker | waiting for Codex usage |
-| B3. Game-function batches | after B1/B4 |
+| Plan, branch `block3`, corpus at `builds/corpus` | Done 2026-10-16 |
+| Native-function contract | Done. `2_native_game/src/native`: lifted-block shape, pay budget, whole leaf, return to lr. `Dispatcher::set_natives` installs natives over the entry block, per segment (calls in the game do not go through `Machine` hooks) |
+| B1. Dictionary export | Done. `dictionary/export.py` produces `functions.csv` (11,297 functions, 8,246 with notes) and `structs.csv` (129), with ROM strings redacted and checked |
+| B1. Builder / generator hook-up | Done. Every `dictionary/*.csv` goes to `mkds_gen --names`: signature + notes as comments. Games and `race_check` install `native::selected()` (VERIFIED by default; `MKDS_NATIVES=off`/`all`) |
+| B1. Argument/return analysis | Done. `recomp::signature`, `mkds_gen --signatures`: whole-program register liveness through calls and tail calls; merged into `functions.csv` (`sig=auto`). Argument counts agree with public SDK signatures on 81 of 100 |
+| B2. SDK pass (Codex) | Partial, merged; Codex stopped by its usage limit. `sdk_functions.csv`: 1,257 rows (1,157 named, 87 typed, 13 native). 13 native leaves (copy/fill, strlen, clz, 64-bit multiply, divider/sqrt helpers), differential-tested against the ROM (`tests/native_sdk.rs`) |
+| B4. Shadow checker | Built by agent-lift: `recomp::shadow`, `Session::enable_shadow`, `race_check` with `MKDS_SHADOW=1` writes `shadow.txt`. Whole-race run pending |
+| A. GPU 2D (Codex) | Partial; Codex stopped by its usage limit. `gpu/two_d.rs` + `two_d.wgsl`, dirty-page uploads, `render_compare --gpu-2d`. Verification pending |
+| B3. Game-function batches | After the shadow race |

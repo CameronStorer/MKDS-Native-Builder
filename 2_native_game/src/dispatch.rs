@@ -103,6 +103,11 @@ impl Dispatcher {
         map
     }
 
+    /// The translation of the function at `entry` (bit 0 = Thumb) in `segment`, ignoring natives.
+    pub fn translation(&self, segment: &str, entry: u32) -> Option<LiftedFn> {
+        self.table.iter().find(|l| l.segment == segment && l.entry == entry).map(|l| l.f)
+    }
+
     /// Runs `natives` instead of the lifted code at their entries (each in its own segment only, and an
     /// overlay's only while that overlay is resident). `&[]` restores the lifted code everywhere.
     pub fn set_natives(&self, natives: &'static [Native]) {

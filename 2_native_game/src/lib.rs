@@ -22,6 +22,7 @@ pub mod peripherals;
 pub mod raster;
 pub mod residency;
 pub mod rt;
+pub mod shadow;
 pub mod signature;
 pub mod spu;
 pub mod texture;

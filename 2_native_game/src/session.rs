@@ -31,6 +31,8 @@ pub struct Session<'a> {
     /// computed jump ends the slice, as before 2026-10-15 (finer CPU interleaving, much slower).
     pub chain: bool,
     overlay_windows: Vec<(u32, u64, &'static str)>,
+    /// Native functions checked against their translations on every call ([`Session::enable_shadow`]).
+    pub shadow: Option<crate::shadow::Shadow>,
 }
 
 impl<'a> Session<'a> {
@@ -108,7 +110,16 @@ impl<'a> Session<'a> {
             resident_overlays: Vec::new(),
             chain: true,
             overlay_windows: Vec::new(),
+            shadow: None,
         })
+    }
+
+    /// Installs `natives` and runs each call to one of them through the shadow checker
+    /// ([`crate::shadow`]); results in `self.shadow`.
+    pub fn enable_shadow(&mut self, natives: &'static [crate::native::Native]) {
+        self.dispatcher.set_natives(natives);
+        let d = self.dispatcher;
+        self.shadow = Some(crate::shadow::Shadow::new(natives, &|s, e| d.translation(s, e)));
     }
 
     pub fn configure_residency(
@@ -209,7 +220,10 @@ impl<'a> Session<'a> {
             let mut overlay = overlay;
             loop {
                 let before = self.cpu.budget;
-                let next = f(&mut self.cpu, &mut bus, self.pc);
+                let next = match &mut self.shadow {
+                    Some(s) => s.run(f, &mut self.cpu, &mut bus, self.pc),
+                    None => f(&mut self.cpu, &mut bus, self.pc),
+                };
                 if overlay {
                     overlay_used += before.saturating_sub(self.cpu.budget);
                 }

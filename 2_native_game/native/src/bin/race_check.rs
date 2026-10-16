@@ -99,6 +99,10 @@ pub fn run_with_tables(
             .configure_lifted(table7, false);
     }
     session.configure_residency(signatures)?;
+    // MKDS_SHADOW=1: every native function, each call checked against its translation (block 3)
+    if std::env::var_os("MKDS_SHADOW").is_some() {
+        session.enable_shadow(recomp::native::NATIVE);
+    }
     let mut last_frame = u64::MAX;
     let mut last_buttons = u16::MAX;
     let mut target = 0usize;
@@ -238,6 +242,11 @@ pub fn run_with_tables(
     capture(&mut session, dir, "last")?;
     inputs.flush()?;
     telemetry.flush()?;
+    if let Some(shadow) = &session.shadow {
+        eprintln!("Shadow check of native functions:
+{}", shadow.summary());
+        std::fs::write(dir.join("shadow.txt"), shadow.summary())?;
+    }
     if finish.is_none() {
         return Err(format!(
             "Race did not finish within {} hardware frames",
