@@ -37,6 +37,10 @@ pub struct Compositor {
     output: wgpu::Texture,
     staging: Vec<u32>,
     two_d: Option<super::two_d::Renderer2d>,
+    /// Display capture at the output scale ([`recomp::machine::CaptureCarry`] on the GPU): per VRAM bank A-D,
+    /// engine A's screen from the last frame that captured into it, and how many frames ago.
+    captured: Vec<wgpu::Texture>,
+    capture_age: [Option<u32>; 4],
 }
 
 impl Compositor {
@@ -71,12 +75,28 @@ impl Compositor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: Self::FORMAT,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
             // The window samples it through an sRGB view when the window itself is sRGB (colours pass unchanged).
             view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
         });
+        let captured = (0..4)
+            .map(|_| {
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("display capture"),
+                    size: wgpu::Extent3d { width: 256 * scale, height: 192 * scale, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: Self::FORMAT,
+                    usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                })
+            })
+            .collect();
         Compositor {
             scale,
+            captured,
+            capture_age: [None; 4],
             pipeline,
             base: storage("compositor base"),
             other: storage("compositor other"),
@@ -151,7 +171,37 @@ impl Compositor {
         let frame = Frame { engines: [engine(0), engine(0x1000)], scale: self.scale,
             a_top: ((snap.io[0x305] >> 7) & 1) as u32, pad: [0; 2] };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
-        self.dispatch(gpu, layer3d)
+        self.dispatch(gpu, layer3d);
+        self.carry_capture(gpu, snap);
+        &self.output
+    }
+
+    /// Display capture: where engine B shows a recently captured bank, show the engine A image captured there
+    /// (at this scale); remember this frame's engine A if it captures.
+    fn carry_capture(&mut self, gpu: &Gpu, snap: &recomp::machine::RenderSnapshot) {
+        let h = 192 * self.scale;
+        let size = wgpu::Extent3d { width: 256 * self.scale, height: h, depth_or_array_layers: 1 };
+        fn at(texture: &wgpu::Texture, y: u32) -> wgpu::TexelCopyTextureInfo<'_> {
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y, z: 0 }, aspect: wgpu::TextureAspect::All }
+        }
+        let (a_y, b_y) = if snap.a_top() { (0, h) } else { (h, 0) };
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let mut used = false;
+        for age in self.capture_age.iter_mut().flatten() {
+            *age += 1;
+        }
+        if let Some(bank) = recomp::machine::CaptureCarry::shown(snap, self.capture_age) {
+            encoder.copy_texture_to_texture(at(&self.captured[bank], 0), at(&self.output, b_y), size);
+            used = true;
+        }
+        if let Some(bank) = snap.capture_bank() {
+            encoder.copy_texture_to_texture(at(&self.output, a_y), at(&self.captured[bank], 0), size);
+            self.capture_age[bank] = Some(0);
+            used = true;
+        }
+        if used {
+            gpu.queue.submit([encoder.finish()]);
+        }
     }
 
     /// Comparison only: verify every split record, including records hidden by the current 3D layer.

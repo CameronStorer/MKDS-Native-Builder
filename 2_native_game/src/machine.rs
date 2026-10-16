@@ -336,7 +336,9 @@ impl Machine<'_> {
     /// Renders the last completed 3D frame to packed RGBA (alpha 0 = no 3D pixel), using the texture and
     /// texture-palette banks as VRAMCNT currently maps them, and CLEAR_COLOR for the background.
     pub fn render_frame3d(&self) -> Vec<u32> {
-        render_3d(&self.hw.io, &self.hw.vram, &self.frame_polys, self.frame_viewport)
+        let mut polys = self.frame_polys.clone();
+        crate::gx::resolve_toon(&mut polys, &self.hw.io);
+        render_3d(&self.hw.io, &self.hw.vram, &polys, self.frame_viewport)
     }
 
     /// The host's controller state in one call: `buttons` (A B Select Start Right Left Up Down R L = bits 0-9,
@@ -759,6 +761,101 @@ impl RenderSnapshot {
     }
 }
 
+impl RenderSnapshot {
+    /// Engine A is on the top screen (POWCNT1 bit 15).
+    pub fn a_top(&self) -> bool {
+        self.io[0x305] & 0x80 != 0
+    }
+
+    /// Display capture (DISPCAPCNT): the VRAM bank (0 = A .. 3 = D) this frame captures a whole 256 x 192 image
+    /// of engine A's graphics into, if any. Games use it to show 3D on both screens: one frame renders the top
+    /// view and captures it, the next renders the bottom view while engine B shows the captured bank.
+    pub fn capture_bank(&self) -> Option<usize> {
+        let d = u32::from_le_bytes([self.io[0x64], self.io[0x65], self.io[0x66], self.io[0x67]]);
+        (d >> 31 == 1 && (d >> 20) & 3 == 3 && (d >> 29) & 3 == 0).then_some(((d >> 16) & 3) as usize)
+    }
+
+    /// Engine B displays VRAM bank `bank` (C as its BG memory, D as its OBJ memory) on a screen that is on.
+    pub fn engine_b_shows(&self, bank: usize) -> bool {
+        let cnt = self.io[0x240 + bank];
+        let dispcnt_b = u32::from_le_bytes([self.io[0x1000], self.io[0x1001], self.io[0x1002], self.io[0x1003]]);
+        matches!(bank, 2 | 3) && cnt & 0x80 != 0 && cnt & 7 == 4 && (dispcnt_b >> 16) & 3 == 1
+    }
+}
+
+/// Display capture for presenters, at the screens' own resolution: the image engine A showed in a frame that
+/// captured it is shown again where engine B displays that bank afterwards. (Engine B shows the captured bank
+/// unchanged in the games using this, e.g. Mario Kart DS's course intros; the bank itself is not written.) A
+/// capture counts for [`CaptureCarry::FRAMES`] frames, like the bank keeping it across a camera cut, but not
+/// after the game has gone back to drawing that bank itself.
+#[derive(Default)]
+pub struct CaptureCarry {
+    /// Per bank A-D: the captured screen and how many frames ago.
+    banks: [Option<(Vec<u32>, u32)>; 4],
+}
+
+impl CaptureCarry {
+    pub const FRAMES: u32 = 3;
+
+    /// The bank engine B shows from a recent capture, if any (`ages`: frames since each bank's capture).
+    pub fn shown(snap: &RenderSnapshot, ages: [Option<u32>; 4]) -> Option<usize> {
+        (0..4).find(|&bank| ages[bank].is_some_and(|age| age < Self::FRAMES) && snap.engine_b_shows(bank))
+    }
+
+    /// `screens`: the two screens of `snap`, top then bottom (equal halves).
+    pub fn apply(&mut self, snap: &RenderSnapshot, screens: &mut [u32]) {
+        let half = screens.len() / 2;
+        let (a, b) = if snap.a_top() { (0, half) } else { (half, 0) };
+        for bank in self.banks.iter_mut().flatten() {
+            bank.1 += 1;
+        }
+        let ages = std::array::from_fn(|i| self.banks[i].as_ref().map(|b| b.1));
+        if let Some(bank) = Self::shown(snap, ages) {
+            let image = &self.banks[bank].as_ref().unwrap().0;
+            if image.len() == half {
+                screens[b..b + half].copy_from_slice(image);
+            }
+        }
+        if let Some(bank) = snap.capture_bank() {
+            self.banks[bank] = Some((screens[a..a + half].to_vec(), 0));
+        }
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    fn snap(capture_bank: Option<u32>, a_top: bool, b_shows_c: bool) -> RenderSnapshot {
+        let mut io = vec![0u8; 0x2000];
+        if let Some(bank) = capture_bank {
+            io[0x64..0x68].copy_from_slice(&(1u32 << 31 | 3 << 20 | bank << 16).to_le_bytes());
+        }
+        io[0x305] = if a_top { 0x80 } else { 0 };
+        io[0x1002] = 1; // engine B display on
+        io[0x242] = if b_shows_c { 0x84 } else { 0x80 };
+        RenderSnapshot { io, palette: vec![], oam: vec![], vram: vec![], polys: vec![], viewport: [0, 0, 255, 191] }
+    }
+
+    #[test]
+    fn engine_b_shows_the_image_captured_into_its_bank_for_a_few_frames() {
+        let mut carry = CaptureCarry::default();
+        let mut f1 = vec![1, 1, 0, 0]; // top = engine A (1s), bottom = engine B
+        carry.apply(&snap(Some(2), true, false), &mut f1);
+        assert_eq!(f1, [1, 1, 0, 0], "nothing captured yet");
+        let mut f2 = vec![0, 0, 7, 7]; // swapped: engine A (7s) at the bottom, engine B shows bank C on top
+        carry.apply(&snap(None, false, true), &mut f2);
+        assert_eq!(f2, [1, 1, 7, 7], "last frame's capture on engine B's screen");
+        for _ in 0..CaptureCarry::FRAMES {
+            let mut f = vec![0, 0, 7, 7];
+            carry.apply(&snap(None, false, true), &mut f);
+        }
+        let mut stale = vec![0, 0, 7, 7];
+        carry.apply(&snap(None, false, true), &mut stale);
+        assert_eq!(stale, [0, 0, 7, 7], "an old capture is not shown over the game's own drawing");
+    }
+}
+
 fn render_3d(
     io: &[u8],
     vram: &[Vec<u8>],
@@ -786,7 +883,11 @@ impl Machine<'_> {
             palette: self.hw.palette.clone(),
             oam: self.hw.oam.clone(),
             vram: self.hw.vram.to_vec(),
-            polys: self.frame_polys.clone(),
+            polys: {
+                let mut polys = self.frame_polys.clone();
+                crate::gx::resolve_toon(&mut polys, &self.hw.io);
+                polys
+            },
             viewport: self.frame_viewport,
         }
     }

@@ -21,8 +21,8 @@ pub enum Layout {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub renderer: Renderer,
-    /// Internal resolution as a multiple of 256x192 (1-8); `None` = the sharpest that fits the window. Default 1: the
-    /// original look.
+    /// Internal resolution as a multiple of 256x192 (1-8); `None` = the sharpest that fits the window (the default).
+    /// 1 is the original look.
     pub scale: Option<u32>,
     /// Linear filtering when the screens are stretched (`false` = sharp pixels).
     pub smooth: bool,
@@ -38,7 +38,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             renderer: Renderer::Gpu,
-            scale: Some(1),
+            scale: None,
             smooth: false,
             layout: Layout::Stacked,
             fullscreen: false,
@@ -110,8 +110,9 @@ impl Settings {
         format!(
             "# MKDS Native Builder display settings\n\
              #\n\
-             # The defaults show the game the way the DS does: 256 x 192 per screen, sharp pixels, top screen above the\n\
-             # bottom one. Everything below only changes how the screens look, never how the game plays.\n\
+             # By default the 3D is drawn sharper than on a DS, as sharp as your window allows; everything else looks like\n\
+             # the DS: sharp pixels, top screen above the bottom one. Set Scale = 1 for the exact original look.\n\
+             # Everything below only changes how the screens look, never how the game plays.\n\
              # Change a value after the `=`, save, and start the game again. Or use mkds.bat -> \"Display settings\".\n\
              # Delete this file to get the defaults back. For one run, `play.bat --scale 4` or\n\
              # `play.bat --renderer software` override this file.\n\
@@ -121,9 +122,9 @@ impl Settings {
              Renderer = {}\n\
              \n\
              # 3D sharpness, as a multiple of the DS's 256 x 192 (GPU renderer only).\n\
-             #   1    = the original look (default).\n\
-             #   2-8  = upscaled 3D: 2 suits a 1080p monitor, 3-4 suit 1440p / 4K. Higher numbers need a faster graphics card.\n\
-             #   Auto = the sharpest that fits the window (up to 4), recalculated when you resize it.\n\
+             #   Auto = the sharpest that fits the window (up to 4), recalculated when you resize it (default).\n\
+             #   1    = the original look.\n\
+             #   2-8  = a fixed sharpness: 2 suits a 1080p monitor, 3-4 suit 1440p / 4K. Higher numbers need a faster graphics card.\n\
              # The 2D parts (menus, map, HUD) always keep the DS's resolution.\n\
              Scale = {}\n\
              \n\
@@ -197,7 +198,7 @@ mod tests {
         assert_eq!(s.texture_pack, Some(PathBuf::from("C:\\packs\\hd")));
         assert_eq!(Settings::parse(&s.to_text()).unwrap(), s);
         assert_eq!(Settings::parse("Scale = auto").unwrap().scale, None);
-        assert_eq!(Settings::default().scale, Some(1), "the default is the DS's own resolution");
+        assert_eq!(Settings::default().scale, None, "the default is the sharpest that fits the window");
         assert_eq!(Settings::parse("").unwrap(), Settings::default(), "an empty file means the defaults");
     }
 

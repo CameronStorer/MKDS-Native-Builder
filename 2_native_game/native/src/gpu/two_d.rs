@@ -151,6 +151,7 @@ mod tests {
                 }
                 if case % 4 == 0 { snap.io[off+0x6c..off+0x6e].fill(0); }
             }
+            snap.io[0x64..0x68].fill(0); // no display capture: this compares one frame's composition
             let (a,b,a_top) = snap.splits();
             compositor.render_raw(&gpu, &snap, &texture);
             assert_eq!(compositor.split_differences(&gpu,&a,&b),0,"case {case}: split records");

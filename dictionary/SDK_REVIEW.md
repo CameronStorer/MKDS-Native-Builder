@@ -19,11 +19,9 @@ by destination and byte count. Copy entries take source before destination.
 The MSL multiply helper uses little-endian register pairs for its two `u64`
 arguments; its descriptive name does not assert GCC symbol identity.
 
-Public fixed-point API reference: [FX_DivAsync](https://twlsdk.randommeaninglesscharacters.com/docs/nitro/NitroSDK/fx/FX_DivAsync.html)
-and [FX_GetDivResult](https://twlsdk.randommeaninglesscharacters.com/docs/nitro/NitroSDK/fx/FX_GetDivResult.html).
+The fixed-point names (`FX_DivAsync`, `FX_GetDivResult`, ...) follow the SDK's published API names.
 Names and API signatures inform the dictionary; native acceptance depends on
 the user's ROM and the differential checks, including scratch-register state.
 
-Native functions remain `native`, not `native-verified`: a recorded-race shadow
-check and builder integration belong to the other lanes. No native registration
-is enabled in the running game by this change.
+Native functions start as `native` (on trial). Ten were then verified by whole-race shadow checks and are
+`native-verified` (installed by default); see `4_docs/BLOCK3_PLAN.md`.

@@ -61,6 +61,24 @@ pub struct Polygon {
     pub pltt_base: u32,
 }
 
+/// Toon shading (DISP3DCNT bit 1 clear): in a toon/highlight polygon (mode 2) the vertex colour's red (0-31)
+/// indexes the toon table (0x04000380) and that colour replaces the vertex colour; the polygon then modulates
+/// like mode 0, which it becomes here so the table is never applied twice. Mario Kart DS uses it for the star's
+/// rainbow and the flash after a hit. Highlight shading (bit 1 set: table colour added after modulation) is not
+/// modelled and stays as it was.
+pub fn resolve_toon(polys: &mut [Polygon], io: &[u8]) {
+    let half = |o: usize| u16::from_le_bytes([io[o], io[o + 1]]);
+    if half(0x60) & 2 != 0 {
+        return;
+    }
+    for p in polys.iter_mut().filter(|p| (p.attr >> 4) & 3 == 2) {
+        for v in &mut p.verts {
+            v.color = half(0x380 + 2 * (v.color & 31) as usize) & 0x7fff;
+        }
+        p.attr &= !(3 << 4);
+    }
+}
+
 /// Number of parameter words after each geometry command (None: not a command).
 pub fn param_count(cmd: u8) -> Option<usize> {
     Some(match cmd {
@@ -777,5 +795,32 @@ mod tests {
         );
         packed(&mut g, &[0xFE], &[]);
         assert_eq!(g.unknown, vec![0xFE]);
+    }
+}
+
+#[cfg(test)]
+mod toon_tests {
+    use super::*;
+
+    #[test]
+    fn toon_polygons_take_their_colour_from_the_table_once() {
+        let mut io = vec![0u8; 0x400];
+        io[0x380 + 2 * 5..0x380 + 2 * 5 + 2].copy_from_slice(&0x7c1fu16.to_le_bytes());
+        let v = |color| Vertex { clip: [0; 4], color, st: [0; 2] };
+        let mut polys = vec![
+            Polygon { verts: vec![v(5), v(0x03e5)], attr: 2 << 4 | 0x1f << 16, tex_param: 0, pltt_base: 0 },
+            Polygon { verts: vec![v(5)], attr: 0, tex_param: 0, pltt_base: 0 },
+        ];
+        resolve_toon(&mut polys, &io);
+        assert_eq!((polys[0].verts[0].color, polys[0].verts[1].color), (0x7c1f, 0x7c1f), "red 5 -> entry 5");
+        assert_eq!(polys[0].attr, 0x1f << 16, "now modulation");
+        assert_eq!(polys[1].verts[0].color, 5, "other modes unchanged");
+        let again = polys.clone();
+        resolve_toon(&mut polys, &io);
+        assert_eq!(polys, again, "applying twice changes nothing");
+        io[0x60] = 2; // highlight shading: left alone
+        let mut hl = vec![Polygon { verts: vec![v(5)], attr: 2 << 4, tex_param: 0, pltt_base: 0 }];
+        resolve_toon(&mut hl, &io);
+        assert_eq!(hl[0].verts[0].color, 5);
     }
 }

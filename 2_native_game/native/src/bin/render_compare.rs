@@ -124,21 +124,17 @@ fn run() -> Result<(), String> {
         println!("GPU: {} ({:?})", info.name, info.backend);
     }
     let (mut sum, mut worst, mut failed) = (0.0, (101.0f64, String::new()), 0usize);
+    // display capture carries the previous frame's engine A into engine B (consecutive snapshots only)
+    let mut carry: [recomp::machine::CaptureCarry; 3] = Default::default();
     for path in &files {
         let name = path.file_stem().unwrap().to_string_lossy().into_owned();
         let snap = RenderSnapshot::decode(&std::fs::read(path).map_err(|e| e.to_string())?)?;
         if let (Some(out), true) = (&images, dump) {
+            let mut screens = snap.screens();
+            carry[0].apply(&snap, &mut screens);
             std::fs::write(
                 out.join(format!("{name}_screens.ppm")),
-                ppm(
-                    &snap
-                        .screens()
-                        .iter()
-                        .map(|p| p << 8 | 255)
-                        .collect::<Vec<_>>(),
-                    256,
-                    384,
-                ),
+                ppm(&screens.iter().map(|p| p << 8 | 255).collect::<Vec<_>>(), 256, 384),
             )
             .map_err(|e| e.to_string())?;
         }
@@ -152,7 +148,8 @@ fn run() -> Result<(), String> {
             cpu_2d += start.elapsed();
             let (screen_a, screen_b) = (a.compose(Some(&layer)), b.compose(None));
             let (top, bottom) = if a_top { (screen_a,screen_b) } else { (screen_b,screen_a) };
-            let soft: Vec<_> = top.into_iter().chain(bottom).map(|p| (p & 0xffffff00) | 255).collect();
+            let mut soft: Vec<_> = top.into_iter().chain(bottom).map(|p| (p & 0xffffff00) | 255).collect();
+            carry[1].apply(&snap, &mut soft);
             let start = std::time::Instant::now();
             c.render_raw(g, &snap, &texture);
             raw_2d += start.elapsed();
@@ -160,7 +157,8 @@ fn run() -> Result<(), String> {
             let records = c.split_differences(g, &a, &b);
             let actual = g.read_rgba(c.output());
             let diff = Diff::of(&soft, &actual);
-            let screens: Vec<_> = snap.screens().into_iter().map(|p| p << 8 | 255).collect();
+            let mut screens: Vec<_> = snap.screens().into_iter().map(|p| p << 8 | 255).collect();
+            carry[2].apply(&snap, &mut screens);
             let reference = Diff::of(&screens, &actual);
             let bad = records != 0 || diff.identical != diff.pixels || reference.identical != reference.pixels;
             failed += bad as usize;

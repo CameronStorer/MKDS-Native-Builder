@@ -231,12 +231,14 @@ fn spawn_renderer(
     let (job_tx, job_rx) = mpsc::channel::<RenderSnapshot>();
     let (done_tx, done_rx) = mpsc::channel();
     std::thread::spawn(move || {
+        let mut capture = recomp::machine::CaptureCarry::default();
         for job in job_rx {
             let done = if gpu {
                 // Ownership transfer only: raw inputs are decoded and composed by the window's GPU.
                 Done { frame: window::Frame::Gpu(Box::new(window::GpuFrame { snap: job })), took: Duration::ZERO, parts: [Duration::ZERO; 3] }
             } else {
-                let done = job.screens_profiled();
+                let mut done = job.screens_profiled();
+                capture.apply(&job, &mut done.pixels);
                 drop(job);
                 Done { frame: window::Frame::Pixels(done.pixels), took: done.took, parts: done.parts }
             };

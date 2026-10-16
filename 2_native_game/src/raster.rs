@@ -6,7 +6,8 @@
 //! modulation and decal polygon modes, front / back face selection, polygon alpha blending, and a
 //! depth buffer (less-than, or equal-within-tolerance when the polygon asks, with translucent polygons
 //! writing depth only when flagged), shadow-volume masks and polygon-ID rejection. Lighting is
-//! applied by the geometry engine. Not modelled: toon / highlight modes, wireframe (alpha 0) polygons, fog,
+//! applied by the geometry engine; toon shading is resolved into vertex colours before rasterizing
+//! ([`crate::gx::resolve_toon`]). Not modelled: highlight shading, wireframe (alpha 0) polygons, fog,
 //! edge marking, anti-aliasing, per-pixel translucent sort order. Documented console behaviour only.
 use crate::gx::Polygon;
 use crate::texture::{decode, wrap, TexParams};

@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn display_settings_step_through_every_value_and_back() {
-        let mut s = Settings { scale: None, ..Settings::default() };
+        let mut s = Settings::default();
         let mut seen = Vec::new();
         for _ in 0..9 {
             seen.push(setting_value(&s, 1));
