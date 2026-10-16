@@ -19,24 +19,22 @@ file; the builder reads it on your machine, translates the game's machine code i
 - Click **Code -> Download ZIP** on GitHub and unzip it (for example to `C:\MKDS Native Builder`), **or** run
   `git clone https://github.com/CameronStorer/mkds-native-builder`.
 
-**3. Build** (one command)
-- Open the folder, click the address bar, type `cmd` and press Enter. Then run:
-  ```
-  build.bat "C:\path\to\your\game.nds"
-  ```
+**3. Build**
+- **Double-click `build.bat`.** A window opens and asks for your game: paste the path of your `.nds` file (Ctrl+V or
+  right-click; or drag the file into the window) and press Enter.
+  - Tip: in File Explorer, Shift + right-click the `.nds` file and choose **Copy as path**.
+- Or from a terminal: `build.bat "C:\path\to\your\game.nds"`.
 - The first build takes **about 10-20 minutes** (it downloads the Rust libraries it needs and compiles everything). You will see
   progress in five steps. Rebuilds are much faster (often under a minute).
 
 **4. Play**
-  ```
-  play.bat
-  ```
-  (or double-click `builds\mkds\play.exe`).
+- When the build is done, choose **Play** in the same window, or double-click **`play.bat`** any time later
+  (or `builds\mkds\play.exe`).
 
 That's it.
 
-**Or use the menu:** double-click **`mkds.bat`**. It lets you build the game (drag your `.nds` file into the window when it
-asks), play it, and change the controls, all from one place.
+**The menu:** double-click **`mkds.bat`** any time to play, rebuild, or change the controls and display settings, all
+from one place.
 
 ---
 

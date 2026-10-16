@@ -33,6 +33,9 @@ struct Args {
     /// Empty output directory (default: ~/MKDS Builds/<hash prefix>)
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Open the menu at the "your ROM" step (what double-clicking build.bat does)
+    #[arg(long, conflicts_with = "rom")]
+    pick_rom: bool,
     /// Source checkout (default: search upward from cwd and the executable)
     #[arg(long)]
     source: Option<PathBuf>,
@@ -147,6 +150,7 @@ fn run() -> Result<i32, BuildError> {
             offline: args.offline,
             allow_unverified: args.allow_unverified,
             initial_rom: args.rom,
+            pick_rom: args.pick_rom,
         })?;
         return Ok(0);
     }

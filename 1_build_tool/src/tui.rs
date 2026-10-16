@@ -20,6 +20,8 @@ pub struct Config {
     pub offline: bool,
     pub allow_unverified: bool,
     pub initial_rom: Option<PathBuf>,
+    /// Start at the ROM step with an empty path (build.bat double-clicked).
+    pub pick_rom: bool,
 }
 
 enum Msg {
@@ -45,7 +47,10 @@ pub fn run(mut cfg: Config) -> std::io::Result<()> {
     let mut note = None;
     loop {
         let mut terminal = ratatui::init();
+        // a pasted path arrives as one paste event instead of keystrokes that could press Enter early
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
         let exit = app(&mut terminal, &mut cfg, note.take());
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         ratatui::restore();
         match exit? {
             Exit::Quit => return Ok(()),
@@ -77,15 +82,30 @@ fn home_items(cfg: &Config) -> Vec<&'static str> {
     v
 }
 
+/// Where the menu opens: the ROM step with the ROM given on the command line, the empty ROM step (build.bat
+/// double-clicked), or the home screen.
+fn first_screen(cfg: &mut Config, note: Option<(String, Color)>) -> Screen {
+    match cfg.initial_rom.take() {
+        Some(rom) => Screen::Rom { input: rom.to_string_lossy().into_owned(), error: None },
+        None if cfg.pick_rom => Screen::Rom { input: String::new(), error: None },
+        None => home(note),
+    }
+}
+
+/// Pasted text on the ROM step: the first line, without surrounding spaces (quotes are removed on Enter).
+fn paste(screen: &mut Screen, text: &str) {
+    if let Screen::Rom { input, error } = screen {
+        input.push_str(text.lines().next().unwrap_or("").trim());
+        *error = None;
+    }
+}
+
 fn home(note: Option<(String, Color)>) -> Screen {
     Screen::Home { list: ListState::default().with_selected(Some(0)), note }
 }
 
 fn app(terminal: &mut DefaultTerminal, cfg: &mut Config, note: Option<(String, Color)>) -> std::io::Result<Exit> {
-    let mut screen = match cfg.initial_rom.take() {
-        Some(rom) => Screen::Rom { input: rom.to_string_lossy().into_owned(), error: None },
-        None => home(note),
-    };
+    let mut screen = first_screen(cfg, note);
     loop {
         terminal.draw(|f| draw(f, &screen, cfg))?;
         if let Screen::Building { log, rx, result } = &mut screen {
@@ -99,7 +119,14 @@ fn app(terminal: &mut DefaultTerminal, cfg: &mut Config, note: Option<(String, C
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else { continue };
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            Event::Paste(text) => {
+                paste(&mut screen, &text);
+                continue;
+            }
+            _ => continue,
+        };
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -152,7 +179,8 @@ fn app(terminal: &mut DefaultTerminal, cfg: &mut Config, note: Option<(String, C
             }
             Screen::Rom { mut input, error } => match key.code {
                 KeyCode::Esc => home(None),
-                KeyCode::Char(c) => {
+                // Ctrl+V etc.: the terminal pastes (above); never type the letter itself
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     input.push(c);
                     Screen::Rom { input, error: None }
                 }
@@ -434,7 +462,8 @@ fn draw(f: &mut Frame, screen: &Screen, cfg: &Config) {
         }
         Screen::Rom { input, error } => {
             let mut v = vec![
-                Line::from("Drag your MKDS .nds file (USA, revision 0) into this window, or type its path:"),
+                Line::from("Paste the path of your MKDS .nds file (USA, revision 0) and press Enter."),
+                Line::from("(Ctrl+V or right-click pastes; you can also drag the file into this window or type the path.)"),
                 Line::from(format!("> {input}_")),
             ];
             if let Some(e) = error {
@@ -522,8 +551,18 @@ mod tests {
     }
 
     #[test]
+    fn build_bat_opens_the_rom_step_and_a_pasted_path_lands_there() {
+        let mut cfg = Config { source: ".".into(), output: "x".into(), offline: true, allow_unverified: false, initial_rom: None, pick_rom: true };
+        let mut screen = first_screen(&mut cfg, None);
+        paste(&mut screen, "  \"C:\\Games\\my game.nds\"\r\nignored line");
+        assert!(matches!(&screen, Screen::Rom { input, error: None } if input == "\"C:\\Games\\my game.nds\""));
+        cfg.pick_rom = false;
+        assert!(matches!(first_screen(&mut cfg, None), Screen::Home { .. }), "plain mkds.bat opens the home screen");
+    }
+
+    #[test]
     fn every_screen_draws_on_a_small_terminal() {
-        let cfg = Config { source: ".".into(), output: "no-such-game".into(), offline: true, allow_unverified: false, initial_rom: None };
+        let cfg = Config { source: ".".into(), output: "no-such-game".into(), offline: true, allow_unverified: false, initial_rom: None, pick_rom: false };
         let note = Some(("note".to_string(), Color::Green));
         let screens = [
             home(note.clone()),
