@@ -6,6 +6,7 @@
 #[cfg(feature = "interpreter")]
 use crate::interp;
 use crate::mem::{Lifted, LiftedFn};
+use crate::native::Native;
 use crate::residency::SegmentSig;
 use crate::rt::{Bus, Cpu, BUDGET_EXHAUSTED};
 use std::cell::{Cell, RefCell};
@@ -53,6 +54,10 @@ pub struct Dispatcher {
     interpreted: Cell<u64>,
     /// Why execution had to stop inside [`Dispatcher::call`] (a miss without the interpreter).
     error: RefCell<Option<String>>,
+    /// Native functions installed over their lifted entry blocks ([`Dispatcher::set_natives`]), and the
+    /// non-overlay segments last loaded (to rebuild `fixed` when the natives change).
+    natives: Cell<&'static [Native]>,
+    fixed_loaded: RefCell<Vec<&'static str>>,
 }
 
 impl Dispatcher {
@@ -70,6 +75,8 @@ impl Dispatcher {
             miss_refresh: Cell::new(u64::MAX),
             interpreted: Cell::new(0),
             error: RefCell::new(None),
+            natives: Cell::new(&[]),
+            fixed_loaded: RefCell::new(Vec::new()),
         };
         d.set_loaded(loaded);
         d
@@ -90,11 +97,25 @@ impl Dispatcher {
                 map.entry(b).or_insert(l.f);
             }
         }
+        for n in self.natives.get().iter().filter(|n| crate::residency::is_overlay(n.segment) == overlays && loaded.contains(&n.segment)) {
+            map.insert(n.entry, n.f);
+        }
         map
+    }
+
+    /// Runs `natives` instead of the lifted code at their entries (each in its own segment only, and an
+    /// overlay's only while that overlay is resident). `&[]` restores the lifted code everywhere.
+    pub fn set_natives(&self, natives: &'static [Native]) {
+        self.natives.set(natives);
+        let fixed = self.fixed_loaded.borrow().clone();
+        *self.fixed.borrow_mut() = self.build(&fixed, false);
+        let resident = self.resident.borrow().clone();
+        *self.overlay.borrow_mut() = self.build(&resident, true);
     }
 
     /// Replaces the dispatchable segments with `loaded`.
     pub fn set_loaded(&self, loaded: &[&str]) {
+        *self.fixed_loaded.borrow_mut() = self.segment_names(loaded.iter().copied().filter(|s| !crate::residency::is_overlay(s)));
         *self.fixed.borrow_mut() = self.build(loaded, false);
         *self.overlay.borrow_mut() = self.build(loaded, true);
         *self.resident.borrow_mut() = self.segment_names(loaded.iter().copied().filter(|s| crate::residency::is_overlay(s)));

@@ -17,6 +17,7 @@ pub mod input_bus;
 pub mod lift;
 pub mod machine;
 pub mod mem;
+pub mod native;
 pub mod peripherals;
 pub mod raster;
 pub mod residency;
