@@ -268,7 +268,7 @@ No instruction is emulated at run time: the shipped game contains no interpreter
 by your graphics card at a higher resolution, and the sound channels are mixed straight at your audio device's rate. The 2D
 layers (backgrounds and sprites) are still decoded on the CPU at the DS's resolution, as the game's code drives them.
 
-Research notes and progress: **https://docs.cameronstorer.com/mkds-decomp-docs/**
+Research notes and progress: **https://docs.cameronstorer.com/MKDS-Decomp-Docs/**
 
 ## Status
 
