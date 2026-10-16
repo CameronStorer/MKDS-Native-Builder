@@ -125,10 +125,20 @@ fn csv_records(text: &str) -> Vec<Vec<String>> {
     rows
 }
 
-/// `(segment, entry without the Thumb bit)` -> one comment line, from a names table with the columns
-/// `name`, `segment`, `ea` or `address`, and (optional) `meaning` or `notes`, `args`, `returns` (the function
-/// dictionary's format). Rows without a real name, signature or meaning are skipped.
-fn function_names(text: &str) -> Result<HashMap<(String, u32), String>, String> {
+/// One function's dictionary facts, merged over the names tables.
+#[derive(Default)]
+struct Entry {
+    name: String,
+    args: String,
+    returns: String,
+    notes: Vec<String>,
+}
+
+/// Merges the names table `text` into `out` by `(segment, entry without the Thumb bit)`. Columns: `name`,
+/// `segment`, `ea` or `address`, and (optional) `meaning` or `notes`, `args`, `returns` (the function
+/// dictionary's format). A later table overrides only what it fills in: a name or signature replaces the
+/// earlier one, its notes are added after the earlier ones.
+fn merge_names(text: &str, out: &mut HashMap<(String, u32), Entry>) -> Result<(), String> {
     let rows = csv_records(text);
     let head = rows.first().ok_or("names table is empty")?;
     let col = |n: &str| head.iter().position(|h| h.trim() == n);
@@ -137,30 +147,51 @@ fn function_names(text: &str) -> Result<HashMap<(String, u32), String>, String> 
     };
     let cm = col("meaning").or(col("notes"));
     let (ca, cr) = (col("args"), col("returns"));
-    let mut out = HashMap::new();
     for r in rows.iter().skip(1) {
-        let get = |i: usize| r.get(i).map(|v| v.trim()).unwrap_or("");
-        let Ok(ea) = u32::from_str_radix(get(ce).trim_start_matches("0x").trim_start_matches("0X"), 16) else { continue };
-        let generic = get(ci).is_empty() || get(ci).eq_ignore_ascii_case(&format!("sub_{ea:X}"));
-        let mut name = if get(ci).is_empty() { format!("sub_{:X}", ea & !1) } else { get(ci).to_string() };
-        let (args, returns) = (ca.map(get).unwrap_or(""), cr.map(get).unwrap_or(""));
-        if !args.is_empty() || !returns.is_empty() {
-            name = format!("{name}({args})");
-            if !returns.is_empty() && returns != "void" {
-                name = format!("{name} -> {returns}");
-            }
+        let get = |i: Option<usize>| i.and_then(|i| r.get(i)).map(|v| v.trim()).unwrap_or("");
+        let Ok(ea) = u32::from_str_radix(get(Some(ce)).trim_start_matches("0x").trim_start_matches("0X"), 16) else { continue };
+        let e = out.entry((get(Some(cs)).to_string(), ea & !1)).or_default();
+        let name = get(Some(ci));
+        if !name.is_empty() && !name.eq_ignore_ascii_case(&format!("sub_{:X}", ea & !1)) {
+            e.name = name.to_string();
         }
-        let meaning: String = cm.map(get).unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
-        if generic && meaning.is_empty() && args.is_empty() && returns.is_empty() {
-            continue;
+        if !get(ca).is_empty() || !get(cr).is_empty() {
+            (e.args, e.returns) = (get(ca).to_string(), get(cr).to_string());
         }
-        let mut line = if meaning.is_empty() { name } else { format!("{name}: {meaning}") };
-        if line.chars().count() > 300 {
-            line = line.chars().take(297).collect::<String>() + "...";
+        let notes: String = get(cm).split_whitespace().collect::<Vec<_>>().join(" ");
+        if !notes.is_empty() && !e.notes.contains(&notes) {
+            e.notes.push(notes);
         }
-        out.insert((get(cs).to_string(), ea & !1), line);
     }
-    Ok(out)
+    Ok(())
+}
+
+/// The comment line for one function, or `None` when nothing is known beyond its address.
+fn comment_line(ea: u32, e: &Entry) -> Option<String> {
+    if e.name.is_empty() && e.notes.is_empty() && e.args.is_empty() && e.returns.is_empty() {
+        return None;
+    }
+    let mut name = if e.name.is_empty() { format!("sub_{ea:X}") } else { e.name.clone() };
+    if !e.args.is_empty() || !e.returns.is_empty() {
+        name = format!("{name}({})", e.args);
+        if !e.returns.is_empty() && e.returns != "void" {
+            name = format!("{name} -> {}", e.returns);
+        }
+    }
+    let mut line = if e.notes.is_empty() { name } else { format!("{name}: {}", e.notes.join(" | ")) };
+    if line.chars().count() > 300 {
+        line = line.chars().take(297).collect::<String>() + "...";
+    }
+    Some(line)
+}
+
+/// `(segment, entry without the Thumb bit)` -> one comment line, from names tables applied in order.
+fn function_names<'a>(texts: impl IntoIterator<Item = &'a str>) -> Result<HashMap<(String, u32), String>, String> {
+    let mut merged = HashMap::new();
+    for t in texts {
+        merge_names(t, &mut merged)?;
+    }
+    Ok(merged.iter().filter_map(|(k, e)| Some((k.clone(), comment_line(k.1, e)?))).collect())
 }
 
 /// The dictionary's argument / return analysis over all ARM9 code: listed functions and the gap functions
@@ -614,11 +645,11 @@ fn run() -> Result<ExitCode, String> {
     // readable names as comments (ids and code unchanged)
     let mut named = 0usize;
     if !args.names.is_empty() {
-        let mut names = HashMap::new();
+        let mut texts = Vec::new();
         for p in &args.names {
-            let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read names table {}: {e}", p.display()))?;
-            names.extend(function_names(&text)?);
+            texts.push(std::fs::read_to_string(p).map_err(|e| format!("cannot read names table {}: {e}", p.display()))?);
         }
+        let names = function_names(texts.iter().map(|t| t.as_str()))?;
         for f in funcs.iter_mut().filter(|f| !f.arm7) {
             if let Some(line) = names.get(&(f.segment.clone(), f.entry & !1)) {
                 f.code = format!("// {line}\n{}", f.code);
@@ -882,11 +913,23 @@ mod tests {
                    sub_2000000,arm9_main,0x02000000,4,\"Copies a block, \"\"fast\"\"\nacross lines\"\n\
                    sub_2000010,arm9_main,0x02000010,4,\n\
                    OS_Init,arm9_main,0x02000021,8,\n";
-        let names = function_names(csv).unwrap();
+        let names = function_names([csv]).unwrap();
         assert_eq!(names[&("arm9_main".to_string(), 0x0200_0000)], "sub_2000000: Copies a block, \"fast\" across lines");
         assert!(!names.contains_key(&("arm9_main".to_string(), 0x0200_0010)), "generic name, no meaning");
         assert_eq!(names[&("arm9_main".to_string(), 0x0200_0020)], "OS_Init", "Thumb bit ignored");
-        assert!(function_names("a,b\n1,2\n").is_err());
+        assert!(function_names(["a,b\n1,2\n"]).is_err());
+    }
+
+    #[test]
+    fn later_tables_override_only_what_they_fill_in() {
+        let base = "address,segment,name,args,returns,notes
+0x02000000,arm9_main,,a0:u32,void,copies words
+";
+        let refined = "address,segment,name,args,returns,notes
+0x02000000,arm9_main,MI_CpuCopy32,,,
+";
+        let names = function_names([base, refined]).unwrap();
+        assert_eq!(names[&("arm9_main".to_string(), 0x0200_0000)], "MI_CpuCopy32(a0:u32): copies words");
     }
 
     #[test]
@@ -895,7 +938,7 @@ mod tests {
                    0x02000000,arm9_main,4,,game,,,,described,guess,clears a flag\n\
                    0x02000010,arm9_main,4,FX_Div,sdk,,\"a:fx32, b:fx32\",fx32,native,likely,\n\
                    0x02000020,arm9_main,4,,game,,,,unknown,,\n";
-        let names = function_names(csv).unwrap();
+        let names = function_names([csv]).unwrap();
         assert_eq!(names[&("arm9_main".to_string(), 0x0200_0000)], "sub_2000000: clears a flag");
         assert_eq!(names[&("arm9_main".to_string(), 0x0200_0010)], "FX_Div(a:fx32, b:fx32) -> fx32");
         assert!(!names.contains_key(&("arm9_main".to_string(), 0x0200_0020)));
