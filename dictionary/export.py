@@ -1,6 +1,10 @@
 """Builds the function dictionary (`functions.csv`, `structs.csv`) from the mapping project's research tables.
 
-    python dictionary/export.py <My_NDS_GAME/4_docs> [--out dictionary]
+    python dictionary/export.py <My_NDS_GAME/4_docs> [--signatures signatures.csv] [--out dictionary]
+
+`--signatures`: the generator's argument / return analysis (`mkds_gen ... --signatures FILE`, run on your ROM);
+it fills `args` / `returns` and sets `sig` to `auto`. `returns` there means "what callers use" (`void`: nobody
+reads a result; empty: no direct caller), and `u64` means callers read r1 too.
 
 The dictionary holds only our own work: addresses, sizes, names, signatures and prose. Nothing from the ROM:
 - the research table's `strings` column (text found in the ROM) is never read into the output, and any of those
@@ -18,7 +22,7 @@ import os
 import re
 import sys
 
-COLUMNS = ["address", "segment", "size", "name", "kind", "area", "args", "returns", "status", "confidence", "notes"]
+COLUMNS = ["address", "segment", "size", "name", "kind", "area", "args", "returns", "sig", "status", "confidence", "notes"]
 STRUCT_COLUMNS = ["name", "aliases", "parent", "root", "size", "recognize", "description"]
 
 # research-table status -> how sure the prose is
@@ -62,11 +66,12 @@ def clean(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def export(docs, out):
+def export(docs, out, signatures=None):
     table = read_csv(os.path.join(docs, "FUNCTION_TABLE.csv"))
     strings = rom_strings(table)
     by_key = {(r["segment"], int(r["ea"], 16)): r for r in table}
     sdk = {int(r["address"], 16) for r in read_csv(os.path.join(docs, "SDK_FUNCTIONS.csv"))}
+    sigs = {(r["segment"], int(r["address"], 16)): r for r in read_csv(signatures)} if signatures else {}
 
     rows = []
     for b in read_csv(BOUNDARIES):
@@ -76,6 +81,7 @@ def export(docs, out):
         name = r.get("name") or ""
         named = bool(name) and not name.startswith("sub_")
         notes = redact(clean(r.get("meaning")), strings)
+        sig = sigs.get((b["segment"], address), {})
         rows.append({
             "address": f"0x{address:08X}",
             "segment": b["segment"],
@@ -83,8 +89,9 @@ def export(docs, out):
             "name": name if named else "",
             "kind": "sdk" if address in sdk or status == "sdk" else "game",
             "area": redact(clean(r.get("area")), strings),
-            "args": "",
-            "returns": "",
+            "args": sig.get("args", ""),
+            "returns": sig.get("returns", ""),
+            "sig": "auto" if sig else "",
             "status": "named" if named else ("described" if notes else "unknown"),
             "confidence": CONFIDENCE.get(status, ""),
             "notes": notes,
@@ -121,6 +128,7 @@ def check(out, strings):
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("docs", help="the mapping project's 4_docs folder")
+    p.add_argument("--signatures", help="mkds_gen --signatures output")
     p.add_argument("--out", default=HERE)
     a = p.parse_args()
-    export(a.docs, a.out)
+    export(a.docs, a.out, a.signatures)

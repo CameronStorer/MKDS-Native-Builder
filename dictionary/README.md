@@ -17,7 +17,12 @@ or text from the game. The builder puts it to work on your machine:
 | `sdk_functions.csv`, `game_*.csv` | Hand-refined rows. They override `functions.csv` by address; files are applied in name order |
 | `export.py` | The exporter. It drops ROM strings and links into the hand port, and fails if any slip through |
 
-Columns: `address, segment, size, name, kind, area, args, returns, status, confidence, notes`.
+Columns: `address, segment, size, name, kind, area, args, returns, sig, status, confidence, notes`.
+
+`args` and `returns` start out filled by the generator's argument/return analysis (`sig` = `auto`), which looks at
+which registers each function reads and what its callers use afterwards. `returns` means what the callers use:
+`void` means no caller reads a result, empty means there is no direct caller, and `u64` means callers also read r1.
+Rows refined by hand override these.
 
 `status` describes how far each function has got:
 

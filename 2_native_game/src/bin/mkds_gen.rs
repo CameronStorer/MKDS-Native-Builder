@@ -22,6 +22,8 @@ mod build_support;
 mod lift;
 #[path = "../rt.rs"]
 mod rt;
+#[path = "../signature.rs"]
+mod signature;
 #[path = "../thumb.rs"]
 mod thumb;
 
@@ -50,10 +52,13 @@ struct Args {
     /// `dictionary/*.csv`, or the older `name,segment,ea,...,meaning` table), written as comments above
     /// generated functions; ids and code are unchanged. Repeatable: later tables override earlier ones.
     names: Vec<PathBuf>,
+    /// Write the argument / return analysis (`recomp::signature`) of every ARM9 function here (CSV), for
+    /// the function dictionary.
+    signatures: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let (mut rom, mut metadata, mut out, mut lockfile, mut names) = (None, None, None, None, Vec::new());
+    let (mut rom, mut metadata, mut out, mut lockfile, mut names, mut signatures) = (None, None, None, None, Vec::new(), None);
     let mut recomp = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let (mut part_bytes, mut game, mut allow_incomplete) = (DEFAULT_PART_BYTES, true, false);
     let mut it = std::env::args().skip(1);
@@ -66,6 +71,7 @@ fn parse_args() -> Result<Args, String> {
             "--recomp" => recomp = PathBuf::from(value("--recomp")?),
             "--lockfile" => lockfile = Some(PathBuf::from(value("--lockfile")?)),
             "--names" => names.push(PathBuf::from(value("--names")?)),
+            "--signatures" => signatures = Some(PathBuf::from(value("--signatures")?)),
             "--part-bytes" => {
                 part_bytes = value("--part-bytes")?.parse().map_err(|_| "--part-bytes must be a number")?;
                 if part_bytes < 10_000 {
@@ -87,6 +93,7 @@ fn parse_args() -> Result<Args, String> {
         game,
         allow_incomplete,
         names,
+        signatures,
     })
 }
 
@@ -154,6 +161,50 @@ fn function_names(text: &str) -> Result<HashMap<(String, u32), String>, String> 
         out.insert((get(cs).to_string(), ea & !1), line);
     }
     Ok(out)
+}
+
+/// The dictionary's argument / return analysis over all ARM9 code: listed functions and the gap functions
+/// discovery found (they make calls too). A call resolves to the caller's own overlay first, then the fixed
+/// image. CSV `address,segment,args,returns,callers` (address without the Thumb bit).
+fn write_signatures(
+    path: &std::path::Path,
+    pending: &[Pending],
+    gap_funcs: &BTreeMap<u32, lift::Func>,
+    ov_gap_funcs: &BTreeMap<String, BTreeMap<u32, lift::Func>>,
+    fixed_seg: &dyn Fn(u32) -> Option<String>,
+) -> Result<(), String> {
+    let mut funcs: BTreeMap<(String, u32), &lift::Func> = BTreeMap::new();
+    for p in pending {
+        funcs.insert((p.segment.clone(), p.func.entry & !1), &p.func);
+    }
+    for (&e, f) in gap_funcs {
+        if let Some(seg) = fixed_seg(e) {
+            funcs.entry((seg, e & !1)).or_insert(f);
+        }
+    }
+    for (ov, fs) in ov_gap_funcs {
+        for (&e, f) in fs {
+            funcs.entry((ov.clone(), e & !1)).or_insert(f);
+        }
+    }
+    let resolve = |caller: &(String, u32), t: u32| -> Option<(String, u32)> {
+        let own = (caller.0.clone(), t & !1);
+        if caller.0.starts_with("ov9_") && funcs.contains_key(&own) {
+            return Some(own);
+        }
+        let fixed = (fixed_seg(t)?, t & !1);
+        funcs.contains_key(&fixed).then_some(fixed)
+    };
+    let sig = signature::analyse(&funcs, &resolve);
+    let mut csv = String::from("address,segment,args,returns,callers
+");
+    for ((seg, entry), s) in &sig {
+        let (a, r) = signature::describe(s);
+        let _ = writeln!(csv, "{entry:#010X},{seg},\"{a}\",{r},{}", s.callers);
+    }
+    std::fs::write(path, csv).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    eprintln!("mkds_gen: argument/return analysis of {} functions written to {}", sig.len(), path.display());
+    Ok(())
 }
 
 fn sha_hex(bytes: &[u8]) -> String {
@@ -482,6 +533,10 @@ fn run() -> Result<ExitCode, String> {
             row.reason = format!("{} entry points added by cross-function discovery", p.extra.len());
         }
         funcs.push(Lifted { arm7: false, segment: p.segment.clone(), entry: p.func.entry, code: lift::emit_with(&p.func, &id, Some(&img)), id });
+    }
+
+    if let Some(path) = &args.signatures {
+        write_signatures(path, &pending, &gap_funcs, &ov_gap_funcs, &|a| fixed_seg(a))?;
     }
 
     // code with no metadata, found by the generator: our own IRQ vector stubs (rt.rs) and the
