@@ -297,6 +297,9 @@ pub struct Bus {
     /// Cycles into the current scanline and the scanline number.
     pub line_cycles: u64,
     pub line: u64,
+    /// DISPCAPCNT as latched when this frame's display started (0 = no capture this frame). The hardware clears
+    /// the enable bit when the capture ends, so one enable captures one frame.
+    pub capture_latch: u32,
     /// Total cycles advanced.
     pub cycles: u64,
     /// Words written to IPCFIFOSEND (for the ARM7/sound HLE, lane L7).
@@ -357,6 +360,7 @@ impl Bus {
             gx: Vec::new(),
             line_cycles: 0,
             line: 0,
+            capture_latch: 0,
             cycles: 0,
             ipc_out: Vec::new(),
             arm7_sync: 0,
@@ -1029,6 +1033,14 @@ impl Bus {
                 self.line = (self.line + 1) % LINES;
                 let mut s = self.io_get(0x004, 2) & !2;
                 let vc = (s >> 8 | (s & 0x80) << 1) as u64;
+                if self.line == 0 {
+                    let d = self.io_get(0x064, 4);
+                    self.capture_latch = if d >> 31 == 1 { d } else { 0 };
+                }
+                if self.line == VISIBLE_LINES && self.capture_latch != 0 {
+                    let d = self.io_get(0x064, 4) & 0x7fff_ffff; // the capture is done
+                    self.io_set(0x064, 4, d);
+                }
                 if self.line == VISIBLE_LINES {
                     s |= 1;
                     if s & 0x8 != 0 {

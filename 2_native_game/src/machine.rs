@@ -878,8 +878,11 @@ impl Machine<'_> {
     /// Synchronize pending GX writes and capture exactly the inputs used by the renderer.
     pub fn render_snapshot(&mut self) -> RenderSnapshot {
         self.sync_gx();
+        let mut io = self.hw.io.clone();
+        // the capture of the frame being shown (the enable bit itself may already be cleared)
+        io[0x64..0x68].copy_from_slice(&self.hw.capture_latch.to_le_bytes());
         RenderSnapshot {
-            io: self.hw.io.clone(),
+            io,
             palette: self.hw.palette.clone(),
             oam: self.hw.oam.clone(),
             vram: self.hw.vram.to_vec(),

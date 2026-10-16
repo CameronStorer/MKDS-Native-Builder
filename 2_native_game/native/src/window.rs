@@ -4,7 +4,7 @@
 use crate::gpu::{Compositor, Gpu, Renderer3d};
 use recomp::machine::RenderSnapshot;
 use mkds_builder::controls;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -43,7 +43,8 @@ struct InputState {
 /// What the emulation thread and the window share.
 pub struct HostLink {
     input: Mutex<InputState>,
-    frame: Mutex<Option<Frame>>,
+    /// Frames not yet shown, oldest first.
+    frames: Mutex<VecDeque<Frame>>,
     closed: AtomicBool,
     finished: AtomicBool,
     proxy: Mutex<Option<EventLoopProxy<()>>>,
@@ -54,7 +55,7 @@ impl HostLink {
     fn new() -> Arc<HostLink> {
         Arc::new(HostLink {
             input: Mutex::new(InputState::default()),
-            frame: Mutex::new(None),
+            frames: Mutex::new(VecDeque::new()),
             closed: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             proxy: Mutex::new(None),
@@ -87,9 +88,16 @@ impl HostLink {
         s.touch.filter(|_| s.focused)
     }
 
-    /// Shows `frame` at the next redraw; a newer frame replaces one not yet shown.
+    /// Queues `frame`; each screen refresh shows the next one. Frames arrive unevenly (the emulation runs in
+    /// bursts), so a short queue keeps two frames that land in the same refresh from replacing each other, which
+    /// showed as a dropped frame followed by a repeated one (visible stutter in the course preview videos).
     pub fn present(&self, frame: Frame) {
-        *self.frame.lock().unwrap() = Some(frame);
+        let mut q = self.frames.lock().unwrap();
+        q.push_back(frame);
+        while q.len() > MAX_QUEUED {
+            q.pop_front(); // the display fell behind: catch up rather than lag
+        }
+        drop(q);
         self.wake();
     }
 
@@ -120,6 +128,9 @@ impl HostLink {
         }
     }
 }
+
+/// Frames the window may hold back: absorbs uneven arrival without adding noticeable lag (2 refreshes).
+const MAX_QUEUED: usize = 2;
 
 /// Runs the window on this (main) thread and `emulation` on a second thread until the emulation returns.
 /// How the window shows the screens (from `settings.txt` and the command line).
@@ -305,12 +316,22 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                let frame = self.link.frame.lock().unwrap().take();
+                let (frame, more) = {
+                    let mut q = self.link.frames.lock().unwrap();
+                    let f = q.pop_front();
+                    (f, !q.is_empty())
+                };
                 if let Some(g) = &mut self.gfx {
                     if let Err(e) = g.draw(frame, &self.link) {
                         self.error = Some(e);
                         self.link.closed.store(true, Ordering::Release);
                         event_loop.exit();
+                        return;
+                    }
+                }
+                if more {
+                    if let Some(w) = &self.window {
+                        w.request_redraw(); // the next queued frame at the next refresh
                     }
                 }
             }
