@@ -340,25 +340,20 @@ impl Engine2d<'_> {
         (self.r16(0x4a) >> if object { 8 } else { 0 }) & 0x3f
     }
 
-    /// The layer stack at one pixel, in the order `render` builds it: up to two `(layer, colour, semi)` entries
-    /// (layer 0-3 BG, 4 OBJ, 5 backdrop; layer 0 with `three_d` = the 3D pixel). `three_d`: `None` = no 3D pixel
-    /// here; `Some(alpha)` = a 3D pixel of that alpha (colour 0 stands in for it).
-    fn stack(&self, d: u32, x: usize, y: usize, sprites: &[Option<(u8, u32, bool)>; W], mask: u32, three_d: Option<u32>)
-        -> [(usize, u32, bool); 2] {
-        let backdrop = rgb(self.pal(0));
-        let blend = self.r16(0x50);
-        let mut layers = [(5usize, backdrop, false); 2];
-        let mut count = 0;
-        let mut add = |layer, color: u32, semi| {
-            layers[count] = (layer, color, semi);
-            count += 1;
-            let alpha = (semi && (layer != 0 || color & 255 != 255)) || (blend >> 6) & 3 == 1 && blend & (1 << layer) != 0;
-            count == 2 || mask & 32 == 0 || blend & 0x3f00 == 0 || !alpha
-        };
+    /// Up to three layers at one pixel in `render`'s scan order, without its early stops: `(layer, colour, semi,
+    /// is_3d)` (layer 0-3 BG, 4 OBJ; the 3D layer as layer 0 with `is_3d`). Three is enough for both stacks
+    /// [`Engine2d::fold`] derives: two layers besides the (single) 3D one.
+    fn scan(&self, d: u32, x: usize, y: usize, sprites: &[Option<(u8, u32, bool)>; W], mask: u32) -> ([(usize, u32, bool, bool); 3], usize) {
+        let mut found = [(5usize, 0u32, false, false); 3];
+        let mut n = 0;
         'p: for prio in 0..4u32 {
             if let Some((sp, c, semi)) = sprites[x] {
-                if mask & 16 != 0 && sp as u32 == prio && add(4, c, semi) {
-                    break 'p;
+                if mask & 16 != 0 && sp as u32 == prio {
+                    found[n] = (4, c, semi, false);
+                    n += 1;
+                    if n == 3 {
+                        break 'p;
+                    }
                 }
             }
             for bg in 0..4usize {
@@ -366,20 +361,41 @@ impl Engine2d<'_> {
                     continue;
                 }
                 if bg == 0 && d & 8 != 0 && d & 0x100 != 0 && self.r16(8) & 3 == prio {
-                    if let Some(a) = three_d {
-                        if add(0, a, true) {
-                            break 'p;
-                        }
+                    found[n] = (0, 0, true, true);
+                } else if d & (0x100 << bg) != 0 && self.r16(8 + 2 * bg) & 3 == prio {
+                    match self.background_pixel(bg, x, y) {
+                        Some(c) => found[n] = (bg, c, false, false),
+                        None => continue,
                     }
+                } else {
                     continue;
                 }
-                if d & (0x100 << bg) != 0 && self.r16(8 + 2 * bg) & 3 == prio {
-                    if let Some(c) = self.background_pixel(bg, x, y) {
-                        if add(bg, c, false) {
-                            break 'p;
-                        }
-                    }
+                n += 1;
+                if n == 3 {
+                    break 'p;
                 }
+            }
+        }
+        (found, n)
+    }
+
+    /// The two-layer stack `render` builds from scanned layers: `three_d` = `None` (no 3D pixel here) or the alpha
+    /// of a 3D pixel; same early stops as `render`.
+    fn fold(&self, mask: u32, scanned: &[(usize, u32, bool, bool)], three_d: Option<u32>) -> [(usize, u32, bool); 2] {
+        let blend = self.r16(0x50);
+        let mut layers = [(5usize, rgb(self.pal(0)), false); 2];
+        let mut count = 0;
+        for &(layer, color, semi, is_3d) in scanned {
+            let color = match (is_3d, three_d) {
+                (true, None) => continue,
+                (true, Some(alpha)) => alpha,
+                _ => color,
+            };
+            layers[count] = (layer, color, semi);
+            count += 1;
+            let alpha = (semi && (layer != 0 || color & 255 != 255)) || (blend >> 6) & 3 == 1 && blend & (1 << layer) != 0;
+            if count == 2 || mask & 32 == 0 || blend & 0x3f00 == 0 || !alpha {
+                break;
             }
         }
         layers
@@ -444,12 +460,15 @@ impl Engine2d<'_> {
             for x in 0..W {
                 let i = y * W + x;
                 let mask = self.window_mask(d, x, y, object_window[x].is_some());
-                split.base[i] = self.blend_stack(d, mask, self.stack(d, x, y, &sprites, mask, None));
+                // One scan per pixel; both stacks (without and with a 3D pixel) are folded from it.
+                let (scanned, n) = self.scan(d, x, y, &sprites, mask);
+                let scanned = &scanned[..n];
+                split.base[i] = self.blend_stack(d, mask, self.fold(mask, scanned, None));
                 if !three_d_on || mask & 1 == 0 {
                     continue;
                 }
                 // Where would a translucent 3D pixel sit, and what is next to it?
-                let with = self.stack(d, x, y, &sprites, mask, Some(0x80));
+                let with = self.fold(mask, scanned, Some(0x80));
                 let effects = mask & 32 != 0;
                 if with[0].0 == 0 {
                     // 3D on top. Translucent: `render` collected the real layer behind it. Opaque: `render` stops at

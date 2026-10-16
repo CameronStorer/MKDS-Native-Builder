@@ -152,7 +152,7 @@ impl Renderer3d {
         timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) -> &wgpu::Texture {
         let (tex, pal) = snap.texture_memory();
-        self.cache.begin_frame();
+        self.cache.begin_frame(&tex, &pal);
         let mut textures = HashMap::new();
         let mut triangles = Vec::new();
         let mut tiles: Vec<Vec<u32>> = (0..768).map(|_| Vec::new()).collect();

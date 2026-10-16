@@ -12,6 +12,10 @@ pub(super) struct TextureCache {
     uploaded: usize,
     dump: Option<Dumper>,
     pack: Pack,
+    /// Texture memory of the previous frame and the slots its textures resolved to: while the bytes are unchanged
+    /// (most frames), a texture's slot is reused without hashing its memory again.
+    last_memory: (Vec<u8>, Vec<u8>),
+    memo: HashMap<(u32, u32), (u32, u32)>,
 }
 const CAPACITY: usize = 16 * 1024 * 1024;
 // A paged integer texture avoids the much smaller storage-buffer binding limit
@@ -56,6 +60,8 @@ impl TextureCache {
             uploaded: 0,
             dump: None,
             pack: Pack::default(),
+            last_memory: (Vec::new(), Vec::new()),
+            memo: HashMap::new(),
         }
     }
     pub fn set_dump(&mut self, path: Option<PathBuf>) {
@@ -72,18 +78,31 @@ impl TextureCache {
         Ok(count)
     }
     fn clear(&mut self) {
+        self.memo.clear();
         self.entries.clear();
         self.pixels.clear();
         self.uploaded = 0;
     }
-    pub fn begin_frame(&mut self) {
+    pub fn begin_frame(&mut self, tex: &[u8], pal: &[u8]) {
         // Eviction is only legal before assigning this frame's offsets. Lazy PNG
         // results survive arena eviction, so no file is decoded or warned twice.
         if self.pixels.len() > CAPACITY / 2 {
             self.clear();
         }
+        if self.last_memory.0 != tex || self.last_memory.1 != pal {
+            self.memo.clear();
+            self.last_memory = (tex.to_vec(), pal.to_vec());
+        }
     }
     pub fn get(&mut self, reg: u32, base: u32, tex: &[u8], pal: &[u8]) -> (u32, u32) {
+        if let Some(&slot) = self.memo.get(&(reg, base)) {
+            return slot;
+        }
+        let slot = self.resolve(reg, base, tex, pal);
+        self.memo.insert((reg, base), slot);
+        slot
+    }
+    fn resolve(&mut self, reg: u32, base: u32, tex: &[u8], pal: &[u8]) -> (u32, u32) {
         let p = TexParams::from_reg(reg);
         if p.format == 0 {
             return (0, 1);
